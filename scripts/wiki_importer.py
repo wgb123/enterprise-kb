@@ -175,16 +175,18 @@ class WikipediaImporter:
         max_chunk_tokens: int = 512,
         checkpoint_path: str = "",
         embed_only_summary: bool = True,
+        skip_vectors: bool = False,
     ) -> None:
         self.batch_size = batch_size
         self.embed_summary_chars = embed_summary_chars
         self.max_chunk_tokens = max_chunk_tokens
         self.embed_only_summary = embed_only_summary
+        self.skip_vectors = skip_vectors
 
         # 存储
         self.vector_store = QdrantStore()
         self.bm25_index = BM25Index()
-        self.embedder = BGEM3Embedder()  # 始终创建嵌入器，embed_only_summary 只控制文本范围
+        self.embedder = None if skip_vectors else BGEM3Embedder()
 
         # 检查点
         self.checkpoint_path = Path(checkpoint_path or project_root / "data" / "wiki_import_checkpoint.json")
@@ -197,6 +199,12 @@ class WikipediaImporter:
         self._page_count = 0
         self._chunk_count = 0
         self._start_time = time.time()
+
+        # 全量 BM25 文档累积（_flush_buffers 中 build 只保留最后一批，
+        # 所以我们独立累积所有文档，在 _finalize 中一次性构建完整索引）
+        self._all_bm25_docs: list[dict] = []
+        self._flush_count = 0  # 每 10 次 flush 增量持久化一次 BM25
+        self._bm25_persist_path = project_root / "data" / "wiki_bm25.pkl"
 
     # ── 公开 API ──
 
@@ -219,7 +227,9 @@ class WikipediaImporter:
         if self.checkpoint_path.is_file():
             try:
                 data = json.loads(self.checkpoint_path.read_text())
-                self._processed_ids = set(data.get("processed_ids", []))
+                # 兼容新旧格式: processed_ids (旧) 或 recent_ids (新)
+                ids = data.get("processed_ids") or data.get("recent_ids") or []
+                self._processed_ids = set(ids)
                 print(f"📌 发现断点，已处理 {len(self._processed_ids)} 篇")
             except Exception as exc:
                 print(f"⚠️ 断点文件损坏，重新开始: {exc}")
@@ -252,7 +262,10 @@ class WikipediaImporter:
         print(f"\n📂 文件: {xml_path.name} ({file_size / 1024**3:.2f} GB)")
         print(f"📐 批次大小: {self.batch_size} 篇/批")
         print(f"🧠 BM25: 全量文本索引")
-        print(f"🔤 Qdrant: 仅标题+前{self.embed_summary_chars}字符")
+        if self.skip_vectors:
+            print(f"⏭️  Qdrant: 已跳过（--skip-vectors）")
+        else:
+            print(f"🔤 Qdrant: 仅标题+前{self.embed_summary_chars}字符")
         print(f"📌 断点: {self.checkpoint_path}")
         print()
 
@@ -297,10 +310,13 @@ class WikipediaImporter:
                 self._page_count += 1
                 self._processed_ids.add(article["id"])
 
-                # 每批提交一次
+                # 每批 flush + checkpoint
                 if self._page_count % self.batch_size == 0:
                     self._flush_buffers()
                     self._save_checkpoint()
+
+                # 每 50 篇打印进度
+                if self._page_count % 50 == 0:
                     self._print_progress()
 
                 if max_pages and self._page_count >= max_pages:
@@ -353,7 +369,7 @@ class WikipediaImporter:
         self._chunk_count += len(sections)
 
         # --- Qdrant 向量（仅标题+摘要）---
-        if self.embed_only_summary:
+        if not self.skip_vectors and self.embed_only_summary:
             summary = title
             if sections and sections[0][1]:
                 summary += "\n" + sections[0][1][:self.embed_summary_chars]
@@ -373,12 +389,24 @@ class WikipediaImporter:
     def _flush_buffers(self) -> None:
         """将当前缓冲区中的数据写入存储。"""
         if self._bm25_buffer:
+            # 累积全量文档（用于最后构建完整 BM25 索引）
+            self._all_bm25_docs.extend(self._bm25_buffer)
+            # 批次级 build 仅用于统计当前批次的文档数
             self.bm25_index.build(self._bm25_buffer)
             self._bm25_buffer.clear()
             logger.debug("BM25 索引刷新: %d chunks", self.bm25_index.size)
 
+            # 每 10 次 flush（≈5,000 篇）增量持久化 BM25
+            self._flush_count += 1
+            if self._flush_count >= 10:
+                self._save_bm25_checkpoint()
+                self._flush_count = 0
+
         if self._vector_buffer and self.embedder:
             self._flush_vectors()
+        elif self._vector_buffer:
+            # skip_vectors 模式: 清空缓冲区
+            self._vector_buffer.clear()
 
     def _flush_vectors(self) -> None:
         """写入向量缓冲区到 Qdrant。"""
@@ -421,14 +449,30 @@ class WikipediaImporter:
 
         self._vector_buffer.clear()
 
+    # ── BM25 增量持久化 ──
+
+    def _save_bm25_checkpoint(self) -> None:
+        """每 10 次 flush 增量持久化当前累积的 BM25 索引。"""
+        if not self._all_bm25_docs:
+            return
+        self._bm25_persist_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"  💾 BM25 增量保存: {len(self._all_bm25_docs):,} 篇文档...")
+        self.bm25_index.build(self._all_bm25_docs)
+        self.bm25_index.save(str(self._bm25_persist_path))
+
     # ── 最终化 ──
 
     def _finalize(self, stats: dict[str, Any]) -> None:
         """导入完成后的清理和持久化。"""
-        # 持久化 BM25 索引
+        # 持久化 BM25 索引（使用全量累积文档构建完整索引）
         bm25_path = project_root / "data" / "wiki_bm25.pkl"
         bm25_path.parent.mkdir(parents=True, exist_ok=True)
-        if self.bm25_index.is_built:
+        if self._all_bm25_docs:
+            print(f"\n🔨 构建完整 BM25 索引: {len(self._all_bm25_docs):,} 文档...")
+            self.bm25_index.build(self._all_bm25_docs)
+            self.bm25_index.save(str(bm25_path))
+            print(f"💾 BM25 索引已持久化: {bm25_path} ({self.bm25_index.size} docs)")
+        elif self.bm25_index.is_built:
             self.bm25_index.save(str(bm25_path))
             print(f"\n💾 BM25 索引已持久化: {bm25_path} ({self.bm25_index.size} docs)")
 
@@ -496,6 +540,9 @@ def main() -> None:
         help="向量化模式: summary_only (仅标题+摘要) 或 full (全部文本，CPU 耗时) (默认: summary_only)",
     )
     parser.add_argument("--force", action="store_true", help="忽略断点，从头开始")
+    parser.add_argument(
+        "--skip-vectors", action="store_true", help="跳过 Qdrant 向量嵌入（CPU 极慢时使用，仅构建 BM25）"
+    )
 
     args = parser.parse_args()
 
@@ -510,6 +557,7 @@ def main() -> None:
         batch_size=args.batch_size,
         embed_summary_chars=args.embed_summary_chars,
         embed_only_summary=(args.embed_mode == "summary_only"),
+        skip_vectors=args.skip_vectors,
     )
     importer.run(args.input, max_pages=args.max_pages)
 

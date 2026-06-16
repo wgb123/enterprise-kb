@@ -772,102 +772,6 @@ RRF 不关心原始分数，只关心**顺序**（排名）：
 
 ### 1.7 Reranker 重排序
 
----
-
-## 模块二：LLM API 与 Prompt 工程
-
-### 2.1 OpenAI 兼容 API
-
-**文件：** `src/enterprise_kb/core/generator.py` — 167 行
-
-#### 项目用的什么
-
-DeepSeek API（deepseek-v4-pro），兼容 OpenAI 的 `/chat/completions` 格式。
-
-#### 请求结构
-
-```python
-payload = {
-    "model": "deepseek-v4-pro",
-    "messages": [
-        {"role": "system", "content": "你是一个企业知识库助手..."},
-        {"role": "user", "content": user_prompt},
-    ],
-    "temperature": 0.3,
-    "max_tokens": 2048,
-}
-resp = httpx.post(url, json=payload, headers=headers)
-answer = resp.json()["choices"][0]["message"]["content"]
-```
-
-#### 三种 role 的分工
-
-| role | 职责 | 项目实际内容 |
-|------|------|------------|
-| **system** | 行为约束、全局规则 | 6 条规则：只使用上下文、引用来源、冲突时优先 Wiki、保持代码格式... |
-| **user** | 用户查询 + 检索到的上下文 | 拼接后的上下文文本 + 用户问题 |
-| **assistant** | 模型生成的回复 | API 返回的 content |
-
-system 定规则，user 给材料，assistant 收答案。
-
-#### 异常降级
-
-```python
-try:
-    resp = await client.post(...)
-except TimeoutException:    → "请求超时" + 返回上下文原文
-except HTTPStatusError:     → "服务异常(4xx/5xx)" + 返回上下文原文
-except Exception:           → "生成失败" + 返回上下文原文
-```
-
-任何时候都不让用户看到空白——至少给上下文原文。
-
-#### L1 理解
-
-- OpenAI 兼容 API 的三种 role 分别负责什么？
-- 项目中 LLM 调用发生在管道的什么位置？
-- 异常降级的三种场景分别怎么处理？
-
-### 2.2 Prompt 工程
-
-**文件：** `src/enterprise_kb/core/generator.py` — `DEFAULT_SYSTEM_PROMPT`
-
-#### 项目用的 System Prompt
-
-```text
-你是一个企业知识库助手。请根据提供的上下文信息回答用户问题。
-
-规则：
-1. 只使用上下文中的信息回答，不要编造事实
-2. 如果上下文不足以回答问题，请说"根据现有知识库无法回答这个问题"
-3. 在回答中引用来源，使用 [来源: 文档名称] 格式
-4. 如果多个来源的信息有冲突，优先采信 Wiki 知识库的内容
-5. 用清晰、结构化的语言组织答案
-6. 如果上下文包含代码块，在答案中保持代码格式
-```
-
-#### 每条规则对应的实际问题
-
-| 规则 | 解决 | 面试关键词 |
-|------|------|-----------|
-| ① 只使用上下文 | **幻觉**——不限制 LLM 就编 | "我们通过显式约束上下文来减少幻觉" |
-| ② 无法回答时直说 | **过度自信**——不说不知道就编 | "我们处理了模型对不确定性的表达" |
-| ③ 引用来源 | **可信度**——用户想知道来源 | "我们强制输出引用标记，可溯源" |
-| ④ Wiki 优先 | **冲突解决**——不同来源数据打架 | "不同层级的记忆有明确的优先级规则" |
-| ⑤ 结构化 | **可读性**——一段话糊脸上没人看 | "我们要求结构化输出" |
-| ⑥ 保持代码格式 | **格式损坏**——代码被 markdown 吃 | "我们保留了代码块结构" |
-
-6 条规则 = RAG Prompt 的**最佳实践清单**。
-
-#### L1 理解
-
-- System Prompt 的 6 条规则各自解决什么问题？
-- 没有规则 ① 会有什么问题？（幻觉）
-- 没有规则 ② 会有什么问题？（瞎编答案）
-- 规则 ④ 为什么是 Wiki 优先？
-
----
-
 **文件：** `src/enterprise_kb/core/reranker.py` — 约 170 行
 
 #### Reranker 和 RRF 的区别
@@ -993,5 +897,99 @@ BM25 → 向量 → RRF 融合 → Reranker 重排 → ContextFusion → 生成
 - Reranker 的 top_k 设得比 RRF 还大 → 重排的候选太多，白费工夫
 - 每次 rerank 都重新加载模型 → 应该懒加载
 - 忘记降级 → API 不可用时应该退回到 RRF 排序结果
+
+---
+
+## 模块二：LLM API 与 Prompt 工程
+
+### 2.1 OpenAI 兼容 API
+
+**文件：** `src/enterprise_kb/core/generator.py` — 167 行
+
+#### 项目用的什么
+
+DeepSeek API（deepseek-v4-pro），兼容 OpenAI 的 `/chat/completions` 格式。
+
+#### 请求结构
+
+```python
+payload = {
+    "model": "deepseek-v4-pro",
+    "messages": [
+        {"role": "system", "content": "你是一个企业知识库助手..."},
+        {"role": "user", "content": user_prompt},
+    ],
+    "temperature": 0.3,
+    "max_tokens": 2048,
+}
+resp = httpx.post(url, json=payload, headers=headers)
+answer = resp.json()["choices"][0]["message"]["content"]
+```
+
+#### 三种 role 的分工
+
+| role | 职责 | 项目实际内容 |
+|------|------|------------|
+| **system** | 行为约束、全局规则 | 6 条规则：只使用上下文、引用来源、冲突时优先 Wiki、保持代码格式... |
+| **user** | 用户查询 + 检索到的上下文 | 拼接后的上下文文本 + 用户问题 |
+| **assistant** | 模型生成的回复 | API 返回的 content |
+
+system 定规则，user 给材料，assistant 收答案。
+
+#### 异常降级
+
+```python
+try:
+    resp = await client.post(...)
+except TimeoutException:    → "请求超时" + 返回上下文原文
+except HTTPStatusError:     → "服务异常(4xx/5xx)" + 返回上下文原文
+except Exception:           → "生成失败" + 返回上下文原文
+```
+
+任何时候都不让用户看到空白——至少给上下文原文。
+
+#### L1 理解
+
+- OpenAI 兼容 API 的三种 role 分别负责什么？
+- 项目中 LLM 调用发生在管道的什么位置？
+- 异常降级的三种场景分别怎么处理？
+
+### 2.2 Prompt 工程
+
+**文件：** `src/enterprise_kb/core/generator.py` — `DEFAULT_SYSTEM_PROMPT`
+
+#### 项目用的 System Prompt
+
+```text
+你是一个企业知识库助手。请根据提供的上下文信息回答用户问题。
+
+规则：
+1. 只使用上下文中的信息回答，不要编造事实
+2. 如果上下文不足以回答问题，请说"根据现有知识库无法回答这个问题"
+3. 在回答中引用来源，使用 [来源: 文档名称] 格式
+4. 如果多个来源的信息有冲突，优先采信 Wiki 知识库的内容
+5. 用清晰、结构化的语言组织答案
+6. 如果上下文包含代码块，在答案中保持代码格式
+```
+
+#### 每条规则对应的实际问题
+
+| 规则 | 解决 | 面试关键词 |
+|------|------|-----------|
+| ① 只使用上下文 | **幻觉**——不限制 LLM 就编 | "我们通过显式约束上下文来减少幻觉" |
+| ② 无法回答时直说 | **过度自信**——不说不知道就编 | "我们处理了模型对不确定性的表达" |
+| ③ 引用来源 | **可信度**——用户想知道来源 | "我们强制输出引用标记，可溯源" |
+| ④ Wiki 优先 | **冲突解决**——不同来源数据打架 | "不同层级的记忆有明确的优先级规则" |
+| ⑤ 结构化 | **可读性**——一段话糊脸上没人看 | "我们要求结构化输出" |
+| ⑥ 保持代码格式 | **格式损坏**——代码被 markdown 吃 | "我们保留了代码块结构" |
+
+6 条规则 = RAG Prompt 的**最佳实践清单**。
+
+#### L1 理解
+
+- System Prompt 的 6 条规则各自解决什么问题？
+- 没有规则 ① 会有什么问题？（幻觉）
+- 没有规则 ② 会有什么问题？（瞎编答案）
+- 规则 ④ 为什么是 Wiki 优先？
 
 ---
