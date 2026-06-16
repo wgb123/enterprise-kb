@@ -203,7 +203,6 @@ class WikipediaImporter:
         # 全量 BM25 文档累积（_flush_buffers 中 build 只保留最后一批，
         # 所以我们独立累积所有文档，在 _finalize 中一次性构建完整索引）
         self._all_bm25_docs: list[dict] = []
-        self._flush_count = 0  # 每 10 次 flush 增量持久化一次 BM25
         self._bm25_persist_path = project_root / "data" / "wiki_bm25.pkl"
 
     # ── 公开 API ──
@@ -396,11 +395,8 @@ class WikipediaImporter:
             self._bm25_buffer.clear()
             logger.debug("BM25 索引刷新: %d chunks", self.bm25_index.size)
 
-            # 每 10 次 flush（≈5,000 篇）增量持久化 BM25
-            self._flush_count += 1
-            if self._flush_count >= 10:
-                self._save_bm25_checkpoint()
-                self._flush_count = 0
+            # 每次 flush 都持久化 BM25（确保中断不丢数据）
+            self._save_bm25_checkpoint()
 
         if self._vector_buffer and self.embedder:
             self._flush_vectors()
