@@ -2,6 +2,8 @@
 
 > 三层记忆架构：编译式记忆（A类） + HybridRAG 检索式记忆（B类） + GraphRAG 预留（C类）
 
+> 📖 **新会话请先阅读 `docs/session_handoff.md` 了解项目状态和学习目标**
+
 ## 架构概览
 
 ```

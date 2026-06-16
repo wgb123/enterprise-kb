@@ -104,3 +104,47 @@ class WikiPageResponse(BaseModel):
     content: str
     toc: str
     path: str
+
+
+# ─── Agent 模型 ───
+
+
+class AgentChatRequest(BaseModel):
+    """Agent 对话请求体。"""
+
+    query: str = Field(
+        ...,
+        description="用户查询",
+        min_length=1,
+        max_length=4096,
+    )
+    session_id: str = Field(
+        default="default",
+        description="会话 ID，用于记忆管理",
+    )
+    max_steps: int = Field(
+        default=10,
+        description="Agent 最大推理步数",
+        ge=1,
+        le=20,
+    )
+
+
+class AgentStep(BaseModel):
+    """Agent 推理轨迹中的一步。"""
+
+    step: int
+    action: str  # "tool_call" | "final_answer" | "max_steps_reached" | "timeout" | "error"
+    tool: str | None = None
+    args: str | None = None
+    output: str | None = None
+
+
+class AgentChatResponse(BaseModel):
+    """Agent 对话响应。"""
+
+    answer: str
+    tool_calls: list[str]
+    steps: int
+    session_id: str
+    trace: list[AgentStep]

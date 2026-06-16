@@ -184,7 +184,7 @@ class WikipediaImporter:
         # 存储
         self.vector_store = QdrantStore()
         self.bm25_index = BM25Index()
-        self.embedder = BGEM3Embedder() if not embed_only_summary else None
+        self.embedder = BGEM3Embedder()  # 始终创建嵌入器，embed_only_summary 只控制文本范围
 
         # 检查点
         self.checkpoint_path = Path(checkpoint_path or project_root / "data" / "wiki_import_checkpoint.json")

@@ -12,6 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from enterprise_kb.agent import AgentLoop, MemoryManager
 from enterprise_kb.api.dependencies import (
     get_context_fusion,
     get_generator,
@@ -20,6 +21,9 @@ from enterprise_kb.api.dependencies import (
     get_wiki_navigator,
 )
 from enterprise_kb.api.schemas import (
+    AgentChatRequest,
+    AgentChatResponse,
+    AgentStep,
     HealthResponse,
     IngestRequest,
     IngestResponse,
@@ -245,4 +249,41 @@ async def get_wiki_page(
         "content": page.content,
         "toc": page.html_toc,
         "path": path,
+    }
+
+
+# ─── Agent 端点 ───
+
+_memory_mgr = MemoryManager()
+
+
+@router.post("/agent/chat", response_model=AgentChatResponse)
+async def agent_chat(
+    req: AgentChatRequest,
+    wiki_nav: WikiNavigator = Depends(get_wiki_navigator),
+    hybrid: HybridRetriever = Depends(get_hybrid_retriever),
+) -> dict[str, Any]:
+    """AI Agent 对话端点。
+
+    支持 Function Calling 工具调用、对话记忆、多步推理。
+    工具清单：wiki_search / rag_search / calculator / get_time
+    """
+    memory = _memory_mgr.get_or_create(req.session_id)
+
+    # 每次请求创建新的 AgentLoop（确保工具状态刷新）
+    loop = AgentLoop(max_steps=req.max_steps)
+
+    result = await loop.run(
+        query=req.query,
+        memory=memory,
+    )
+
+    return {
+        "answer": result["answer"],
+        "tool_calls": result["tool_calls"],
+        "steps": result["steps"],
+        "session_id": req.session_id,
+        "trace": [
+            AgentStep(**t) for t in result["trace"]
+        ],
     }

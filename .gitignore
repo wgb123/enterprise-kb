@@ -17,6 +17,7 @@ qdrant_data/storage/
 # Generated data files
 data/wiki_bm25.pkl
 data/wiki_import_checkpoint.json
+data/wiki_import.log
 
 # IDE
 .vscode/
