@@ -176,20 +176,26 @@ class WikipediaImporter:
         checkpoint_path: str = "",
         embed_only_summary: bool = True,
         skip_vectors: bool = False,
+        vectors_only: bool = False,
     ) -> None:
         self.batch_size = batch_size
         self.embed_summary_chars = embed_summary_chars
         self.max_chunk_tokens = max_chunk_tokens
         self.embed_only_summary = embed_only_summary
         self.skip_vectors = skip_vectors
+        self.vectors_only = vectors_only
 
         # 存储
         self.vector_store = QdrantStore()
         self.bm25_index = BM25Index()
         self.embedder = None if skip_vectors else BGEM3Embedder()
 
-        # 检查点
-        self.checkpoint_path = Path(checkpoint_path or project_root / "data" / "wiki_import_checkpoint.json")
+        # 检查点（vectors-only 用独立的 checkpoint 文件）
+        if vectors_only:
+            default_ckpt = "data/wiki_import_checkpoint_vectors.json"
+        else:
+            default_ckpt = "data/wiki_import_checkpoint.json"
+        self.checkpoint_path = Path(checkpoint_path or project_root / default_ckpt)
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 批处理缓冲区
@@ -345,25 +351,26 @@ class WikipediaImporter:
 
         sections = split_by_section(text)
 
-        # --- BM25 入索引 ---
-        for i, (heading, body) in enumerate(sections):
-            if not body:
-                continue
+        # --- BM25 入索引（vectors-only 模式跳过）---
+        if not self.vectors_only:
+            for i, (heading, body) in enumerate(sections):
+                if not body:
+                    continue
 
-            section_text = body
-            if heading:
-                section_text = f"{heading}\n{body}"
+                section_text = body
+                if heading:
+                    section_text = f"{heading}\n{body}"
 
-            chunk_id = hashlib.md5(section_text.encode()).hexdigest()[:12]
-            self._bm25_buffer.append({
-                "text": section_text,
-                "metadata": {
-                    "title": title,
-                    "section_heading": heading.replace("=", "").strip() if heading else "introduction",
-                    "source": "wikipedia",
-                },
-                "chunk_id": f"wiki_{article['id']}_{i}_{chunk_id}",
-            })
+                chunk_id = hashlib.md5(section_text.encode()).hexdigest()[:12]
+                self._bm25_buffer.append({
+                    "text": section_text,
+                    "metadata": {
+                        "title": title,
+                        "section_heading": heading.replace("=", "").strip() if heading else "introduction",
+                        "source": "wikipedia",
+                    },
+                    "chunk_id": f"wiki_{article['id']}_{i}_{chunk_id}",
+                })
 
         self._chunk_count += len(sections)
 
@@ -460,17 +467,18 @@ class WikipediaImporter:
 
     def _finalize(self, stats: dict[str, Any]) -> None:
         """导入完成后的清理和持久化。"""
-        # 持久化 BM25 索引（使用全量累积文档构建完整索引）
-        bm25_path = project_root / "data" / "wiki_bm25.pkl"
-        bm25_path.parent.mkdir(parents=True, exist_ok=True)
-        if self._all_bm25_docs:
-            print(f"\n🔨 构建完整 BM25 索引: {len(self._all_bm25_docs):,} 文档...")
-            self.bm25_index.build(self._all_bm25_docs)
-            self.bm25_index.save(str(bm25_path))
-            print(f"💾 BM25 索引已持久化: {bm25_path} ({self.bm25_index.size} docs)")
-        elif self.bm25_index.is_built:
-            self.bm25_index.save(str(bm25_path))
-            print(f"\n💾 BM25 索引已持久化: {bm25_path} ({self.bm25_index.size} docs)")
+        # 持久化 BM25 索引（vectors-only 模式跳过，Phase 1 已建好）
+        if not self.vectors_only:
+            bm25_path = project_root / "data" / "wiki_bm25.pkl"
+            bm25_path.parent.mkdir(parents=True, exist_ok=True)
+            if self._all_bm25_docs:
+                print(f"\n🔨 构建完整 BM25 索引: {len(self._all_bm25_docs):,} 文档...")
+                self.bm25_index.build(self._all_bm25_docs)
+                self.bm25_index.save(str(bm25_path))
+                print(f"💾 BM25 索引已持久化: {bm25_path} ({self.bm25_index.size} docs)")
+            elif self.bm25_index.is_built:
+                self.bm25_index.save(str(bm25_path))
+                print(f"\n💾 BM25 索引已持久化: {bm25_path} ({self.bm25_index.size} docs)")
 
         # 保存最终检查点
         self._save_checkpoint()
@@ -539,21 +547,26 @@ def main() -> None:
     parser.add_argument(
         "--skip-vectors", action="store_true", help="跳过 Qdrant 向量嵌入（CPU 极慢时使用，仅构建 BM25）"
     )
+    parser.add_argument(
+        "--vectors-only", action="store_true", help="仅嵌入向量（跳过 BM25，Phase 2 使用，使用独立的 checkpoint）"
+    )
 
     args = parser.parse_args()
 
     if args.force:
-        # 删除断点文件
-        ckpt = project_root / "data" / "wiki_import_checkpoint.json"
-        if ckpt.is_file():
-            ckpt.unlink()
-            print("🗑️  已删除断点文件，将从第一篇开始")
+        # 删除所有断点文件
+        for ckpt_name in ["wiki_import_checkpoint.json", "wiki_import_checkpoint_vectors.json"]:
+            ckpt = project_root / "data" / ckpt_name
+            if ckpt.is_file():
+                ckpt.unlink()
+        print("🗑️  已删除断点文件，将从第一篇开始")
 
     importer = WikipediaImporter(
         batch_size=args.batch_size,
         embed_summary_chars=args.embed_summary_chars,
         embed_only_summary=(args.embed_mode == "summary_only"),
         skip_vectors=args.skip_vectors,
+        vectors_only=args.vectors_only,
     )
     importer.run(args.input, max_pages=args.max_pages)
 
