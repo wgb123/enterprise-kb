@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+
+# Environment
+.env
+
+# Qdrant binary + data
+qdrant_data/qdrant
+qdrant_data/qdrant.log
+qdrant_data/.qdrant-initialized
+qdrant_data/storage/
+
+# Generated data files
+data/wiki_bm25.pkl
+data/wiki_import_checkpoint.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
