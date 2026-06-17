@@ -138,6 +138,15 @@ def extract_article(page_elem: etree.Element) -> Optional[dict[str, Any]]:
     if text_el is None or not text_el.text:
         return None
 
+    # 只处理主命名空间（ns=0），跳过 Talk/User/Template/Category 等
+    ns_el = page_elem.find(t("ns"))
+    if ns_el is not None and ns_el.text and ns_el.text.strip() != "0":
+        return None
+
+    # 跳过已删除的页面（XML dump 中保留的占位符）
+    if page_elem.find(t("deleted")) is not None:
+        return None
+
     # 跳过重定向
     redirect = page_elem.find(t("redirect"))
     if redirect is not None:
