@@ -7,7 +7,7 @@ import sys
 import os
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-xml_path = "/mnt/d/zhwiki-20260601-pages-articles-multistream.xml.bz2"
+xml_path = "/home/wgb/projects/enterprise-kb/zhwiki-20260601-pages-articles-multistream.xml.bz2"
 venv_python = os.path.join(project_root, ".venv", "bin", "python")
 script = os.path.join(project_root, "scripts", "wiki_importer.py")
 
@@ -42,7 +42,8 @@ env["HTTPS_PROXY"] = "http://192.168.1.49:7890"
 env["NO_PROXY"] = "localhost,127.0.0.1,0.0.0.0,::1"
 
 proc = subprocess.Popen(
-    [venv_python, script, xml_path,
+    ["nice", "-n", "19", "ionice", "-c", "3",
+     venv_python, script, xml_path,
      "--batch-size", "500",
      "--vectors-only",
      "--max-pages", "20000"],
