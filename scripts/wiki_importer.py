@@ -221,6 +221,7 @@ class WikipediaImporter:
             sys.exit(1)
 
         self._load_checkpoint()
+        self._load_bm25_checkpoint()
         stats = self._parse_and_ingest(xml_path, max_pages)
         self._flush_buffers()
         self._finalize(stats)
@@ -462,6 +463,19 @@ class WikipediaImporter:
         print(f"  💾 BM25 增量保存: {len(self._all_bm25_docs):,} 篇文档...")
         self.bm25_index.build(self._all_bm25_docs)
         self.bm25_index.save(str(self._bm25_persist_path))
+
+    def _load_bm25_checkpoint(self) -> None:
+        """从持久化的 BM25 文件恢复断点，实现断点续传。"""
+        if not self._bm25_persist_path.is_file():
+            return
+        if not self.bm25_index.load(str(self._bm25_persist_path)):
+            return
+        # 从 BM25 索引的 corpus 恢复 _all_bm25_docs
+        self._all_bm25_docs = [
+            {"text": t, "metadata": m}
+            for t, m in zip(self.bm25_index._corpus, self.bm25_index._metadata)
+        ]
+        print(f"📌 BM25 断点恢复: {len(self._all_bm25_docs):,} 篇文档, {self._bm25_persist_path}")
 
     # ── 最终化 ──
 
