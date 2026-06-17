@@ -2141,8 +2141,152 @@ LLM 一次能处理的最大 token 数。System Prompt + user 消息 + assistant
 | **第二层：加分** | 验证 System Prompt 的方法 / 规则和三层记忆的对应关系 | 追问展开 |
 | **第三层：点到为止** | few-shot 示例 / chain-of-thought 提示 / Prompt 自动优化 | 知道就行 |
 
-**2.2 控制在 2~3 分钟。模块二至此完成。**
+**2.2 控制在 2~3 分钟。**
 
 ---
+
+### 2.3 流式输出（SSE）
+
+**文件：** `src/enterprise_kb/core/generator.py`（`stream=True` 参数）
+
+#### 流式 vs 非流式
+
+非流式：LLM 生成完所有 token 一次性返回 → 用户盯白屏 5~10 秒。
+流式：LLM 每生成几个字立刻推到前端 → 字一个个蹦出来，体验天差地别。
+
+```
+非流式：用户 → "Qdrant怎么配？" → [等10秒] → 完整答案
+流式：  用户 → "Qdrant怎么配？" → Q → Qd → Qdra → Qdrant → ...逐字出现
+```
+
+#### SSE 协议实现
+
+SSE（Server-Sent Events）是 HTTP 协议上的单向推送。请求只加一个参数 `stream: true`：
+
+```python
+payload = {"stream": True, ...}  # stream=True
+```
+
+响应体变成逐行文本流，不是 JSON：
+
+```
+data: {"choices":[{"delta":{"content":"Qdrant"}}]}
+data: {"choices":[{"delta":{"content":"配置"}}]}
+data: {"choices":[{"delta":{"content":"需要"}}]}
+...
+data: [DONE]   # 结束信号
+```
+
+每条 `data:` 是一个 SSE 事件，前端 `EventSource` 或 `fetch` + `ReadableStream` 逐条消费。`[DONE]` 表示流结束。
+
+#### 为什么选 SSE 而不是 WebSocket？
+
+| | SSE | WebSocket |
+|------|------|------|
+| 方向 | 单向（服务器→客户端） | 双向 |
+| 协议 | HTTP | ws:// 需要 Upgrade 握手 |
+| 实现 | 极简，原生 fetch 支持 | 需要心跳保活、管理连接状态 |
+
+LLM 流式是纯粹的单向推送——用户发 query，LLM 推 token，用户在生成过程中不需要再发数据。SSE 刚好——单向车道不需要双向高速公路。
+
+#### Nginx 缓冲的坑
+
+Nginx 默认缓冲后端响应——把 LLM 推来的 chunk 攒到缓冲区满了再一次性发给客户端。用户等 30 秒后所有 token 一次性蹦出来，流式效果完全废掉。
+
+**必须关缓冲：**
+```nginx
+location /v1/chat/completions {
+    proxy_buffering off;          # 禁用缓冲
+    proxy_cache off;              # 禁用缓存
+    add_header X-Accel-Buffering no;  # 告诉客户端不要缓冲
+}
+```
+
+#### 流式响应的 token 计数
+
+非流式响应有 `usage.prompt_tokens` 和 `usage.completion_tokens`。流式响应通常没有——因为 token 还没生成完。只在最后一个有 `finish_reason` 的 chunk 里可能带 usage。做成本统计时注意差异。
+
+---
+
+#### 大白话总结（对话讲解版）
+
+**流式 vs 非流式**：非流式等 LLM 全部生成完一次性返回，用户盯白屏。流式每生成几个字立刻推前端，逐字蹦出来。
+
+**SSE 协议**：HTTP 单向推送，请求加 `stream: true`，响应变逐行 `data:` 事件流。`[DONE]` 结束。
+
+**为什么不选 WebSocket**：流式是纯粹单向——用户不发数据，LLM 只推 token。SSE 原生 HTTP，WebSocket 浪费双向能力。
+
+**Nginx 坑**：默认缓冲后端响应，流式效果全废。必须 `proxy_buffering off;` + `X-Accel-Buffering: no`。
+
+---
+
+#### 面试常见问题 & 答案
+
+**Q1. 流式输出怎么实现？**
+
+HTTP SSE（Server-Sent Events）。请求 OpenAI API 时设 `stream: true`，响应变成逐行 `data:` 事件流。前端用 `fetch` + `ReadableStream` 或 `EventSource` 逐条消费。`[DONE]` 事件表示流结束。
+
+> **关键论点**：流式的本质是 HTTP 长连接上的分块传输，不需要额外的协议栈。
+
+**Q2. 为什么选 SSE 而不是 WebSocket？**
+
+流式场景是纯单向推送——服务器推 token 给客户端，客户端在生成过程中不再发数据。WebSocket 是双向协议——额外的心跳保活、连接管理都是浪费。
+
+> **关键论点**：技术选型不是"哪个更高级"，是"场景刚好匹配"。
+
+**Q3. 部署在 Nginx 后面流式会失效，为什么？怎么解决？**
+
+Nginx 默认缓冲后端响应——把 LLM 推来的 chunk 攒到缓冲区满再一次性发给客户端。流式被缓冲成了一次性返回。
+
+解决：
+```nginx
+proxy_buffering off;
+proxy_cache off;
+add_header X-Accel-Buffering no;
+```
+
+> **关键论点**：知道 Nginx 缓冲对流式的影响 + 给出配置。实际部署必踩坑。
+
+**Q4. 流式和非流式在 token 计费上有什么差异？**
+
+非流式响应直接有 `usage.completion_tokens`，流式响应通常没有——只在最后一个 chunk 可能带 usage。成本统计时流式需要自己累加 delta 里的 token 数，或者等最后一个 chunk 的 usage。
+
+> **关键论点**：知道流式响应的 usage 字段不是每个 chunk 都有的。
+
+---
+
+#### 新手名词解释
+
+**SSE（Server-Sent Events）**
+
+HTTP 协议上的单向推送机制。服务器通过长连接持续向客户端推送事件，每条事件格式为 `data: <内容>\n\n`。前端用 `EventSource` API 原生支持。
+
+**流式传输**
+
+服务器在生成数据的同时持续向客户端推送，而不是等全部生成完毕再一次性返回。LLM 场景下流式传输把 token 逐个推到前端，实现"逐字出现"效果。
+
+**缓冲（Buffering）**
+
+代理服务器（如 Nginx）把后端响应暂存，攒够一定量再一次性转发给客户端。目的是优化网络吞吐，但会破坏流式体验。
+
+**长轮询 vs SSE vs WebSocket**
+
+| | 长轮询 | SSE | WebSocket |
+|------|------|------|------|
+| 方向 | 单向（客户端拉） | 单向（服务器推） | 双向 |
+| 连接 | 每次请求新连接 | 长连接 | 长连接 |
+| 适用 | 低频通知 | 流式推送 | 实时聊天/游戏 |
+
+---
+
+#### 面试深度指南
+
+| 层次 | 内容 | 占比 |
+|------|------|------|
+| **第一层：必讲** | 流式 vs 非流式 / SSE 协议原理 / Nginx 缓冲坑 | 80% |
+| **第二层：加分** | SSE vs WebSocket 场景分析 / 流式 token 计数差异 | 追问展开 |
+| **第三层：点到为止** | chunked transfer encoding / Server Push / HTTP/2 多路复用 | 知道就行 |
+
+**2.3 控制在 2~3 分钟。模块二至此全部完成。**
 
 ---
