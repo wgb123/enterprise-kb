@@ -2735,3 +2735,148 @@ LLM 靠 description 判断"什么时候该用哪个工具"。description 只写"
 **3.3 控制在 2~3 分钟。**
 
 ### 3.4 对话记忆
+
+**文件：** `src/enterprise_kb/agent/memory.py` — 约 110 行
+
+#### 为什么需要
+
+Agent 是多轮循环——但不同轮之间怎么记住对话？用户问"刚才那个结果再详细解释一下"——Agent 需要知道"刚才那个"是什么。
+
+#### 三层记忆
+
+| 层级 | 存什么 | 寿命 | 实现 |
+|------|--------|------|------|
+| 短期记忆 | 当前会话消息列表 | 单次会话 | `messages` 列表，滑动窗口裁剪 |
+| 工作记忆 | 提取的关键事实 | 可跨会话 | `key_facts` 列表 |
+| 长期记忆 | 持久化存储 | 永久 | 预留（可用向量数据库） |
+
+当前项目实现了前两层，长期记忆预留接口。
+
+#### 滑动窗口裁剪
+
+消息列表会无限增长——上下文窗口不够用。`max_turns=20` 限制保留最近 N 轮：
+
+```python
+def _trim(self):
+    user_count = sum(1 for m in self.messages if m["role"] == "user")
+    if user_count > self.max_turns:
+        excess = user_count - self.max_turns
+        # 找到第 excess+1 个 user 消息的位置，从前面裁掉
+        count = 0
+        for i, m in enumerate(self.messages):
+            if m["role"] == "user":
+                count += 1
+            if count > excess:
+                self.messages = self.messages[i:]
+                break
+```
+
+**为什么按 user 消息计数而不是按总消息数？** 一轮对话可能包含 user + assistant + N 个 tool message。按轮（user 数）比按条数更稳定——"20 轮对话"不等同于"100 条消息"。
+
+#### 关键事实提取
+
+```python
+memory.add_fact("用户需要 Qdrant 0.11.x 的配置信息")
+```
+
+从对话中提取"用户关心什么"——下次即使滑动窗口裁掉了旧消息，关键事实还在。当前靠 Agent 自己提取，后续可上专门的提取模型。
+
+#### MemoryManager
+
+全局管理器，按 `session_id` 隔离不同用户/会话：
+
+```python
+class MemoryManager:
+    _sessions: dict[str, ConversationMemory] = {}
+
+    def get_or_create(self, session_id: str) -> ConversationMemory:
+        if session_id not in self._sessions:
+            self._sessions[session_id] = ConversationMemory(session_id)
+        return self._sessions[session_id]
+```
+
+一个用户一个 session_id，记忆不串。支持 `delete()` 手动清理、`clear_all()` 全部重置。
+
+#### 在 Agent Loop 中的位置
+
+每次 Agent 循环从 memory 读历史 → 执行推理 → 新消息同步回 memory：
+
+```python
+# 注入历史
+messages.extend(memory.get_full_history())
+# 新消息写入
+memory.add_message("user", query)
+memory.add_message("assistant", answer)
+```
+
+保持 Agent 内 messages 和 memory 一致。
+
+---
+
+#### 大白话总结（对话讲解版）
+
+**三层记忆**：短期（当前会话消息，滑动窗口）、工作（关键事实提取）、长期（预留）。当前实现前两层。
+
+**滑动窗口按轮不按条**：一轮 = user + 可能 N 个 tool + assistant。按 user 计数比按消息总数更稳定。
+
+**MemoryManager**：按 session_id 隔离用户，一个用户不会看到另一个的对话历史。
+
+---
+
+#### 面试常见问题 & 答案
+
+**Q1. Agent 怎么记住之前的对话？上下文不会爆吗？**
+
+三层记忆：短期记忆（当前会话消息 + 滑动窗口裁剪）、工作记忆（关键事实提取）、长期记忆（向量数据库持久化）。滑动窗口 `max_turns=20` 保证上下文不会无限增长，超出部分自动裁掉。
+
+> **关键论点**：记忆管理不只是"全存下来"——是存什么、裁什么、提取什么的策略组合。
+
+**Q2. 滑动窗口为什么按轮（user 数）而不是按消息条数？**
+
+一轮对话可能产生 user + N 个 tool + assistant，消息数不稳定。按 user 数 20 轮可能 = 60~200 条消息——按消息条数设 100 条可能在复杂任务里只剩 5 轮，不够用。
+
+> **关键论点**：按轮裁剪是对语义边界的尊重——一轮是一个完整的问题-回答周期。
+
+**Q3. 裁掉的消息中的重要信息会丢失吗？**
+
+会。所以有 `key_facts` 工作记忆层——Agent 可以在对话过程中提取关键事实（"用户关心 Qdrant 性能调优"），事实持久保留，不随滑动窗口裁掉。
+
+> **关键论点**：滑动窗口解决空间问题，关键事实提取解决信息丢失问题——两层互补。
+
+**Q4. 多用户怎么隔离记忆？**
+
+`MemoryManager` 按 `session_id` 隔离——每个用户/会话独立的 `ConversationMemory` 实例。内存级隔离，不存磁盘。
+
+> **关键论点**：session_id 隔离是基础——生产环境还需加过期清理和持久化。
+
+---
+
+#### 新手名词解释
+
+**短期记忆**
+
+当前会话的消息历史。Agent 每一步都带着它做决策。用滑动窗口限制长度。
+
+**滑动窗口**
+
+只保留最近 N 轮的对话，超出部分从前面裁掉。防止上下文窗口溢出。
+
+**工作记忆**
+
+从对话中提取的关键事实。裁掉旧消息后事实还在，保证重要信息不丢失。
+
+**长期记忆**
+
+跨会话的持久化存储。可用向量数据库实现——把历史对话嵌入后存起来，下次相关时检索回来。
+
+---
+
+#### 面试深度指南
+
+| 层次 | 内容 | 占比 |
+|------|------|------|
+| **第一层：必讲** | 三层记忆分层 / 滑动窗口按轮裁剪 / session_id 隔离 | 80% |
+| **第二层：加分** | 关键事实提取 / 按轮 vs 按条数的逻辑 / MemoryManager | 追问展开 |
+| **第三层：点到为止** | 长期记忆向量化 / 记忆总结 / RAG + 记忆的融合 | 知道就行 |
+
+**3.4 控制在 2~3 分钟。模块三至此全部完成。**
