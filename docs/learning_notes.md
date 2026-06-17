@@ -2453,3 +2453,146 @@ LLM 返回的函数调用指令：`{"id": "call_xxx", "function": {"name": "calc
 **3.1 控制在 2~3 分钟。**
 
 ---
+
+
+### 3.2 Agent Loop
+
+**文件：** `src/enterprise_kb/agent/agent_loop.py` — 237 行
+
+#### Agent 和普通 RAG 有什么区别
+
+普通 RAG（模块一）：用户问 → 检索 → 塞给 LLM → 返回答案。**一次性。**
+
+Agent：用户问 → LLM 想 → 决定"我需要先搜一下 Wiki" → 调工具 → 看结果 → 觉得不够 → 再搜 RAG → 再调计算器 → **够了，组织答案。** 可以走多步。
+
+#### Think → Act → Observe 循环
+
+```
+Think:   LLM 看到用户问题，决定"我需要搜知识库"
+Act:     调用 wiki_search("Qdrant HNSW 参数")
+Observe: 工具返回"ef_construct 默认 200, m 默认 16"
+Think:   "不够，我还需要查一下 M 参数的影响"
+Act:     调用 rag_search("M 参数 HNSW")
+Observe: 工具返回补充信息
+Think:   "信息够了，可以回答"
+→ 输出最终答案
+```
+
+每一步 LLM 都带着之前所有的对话历史（system + user + 已执行 tool 的结果）做决策。它能看到"我已经搜了什么、结果是什么"，从而决定下一步。
+
+#### 核心实现（agent_loop.py）
+
+```python
+while self._step_count < self.max_steps:
+    # 1. 调用 LLM（带 tools 参数）
+    resp = await client.post(api_url, json=payload)
+    msg = resp.json()["choices"][0]["message"]
+
+    # 2. 没有 tool_calls → 直接回答，结束循环
+    if not msg.get("tool_calls"):
+        answer = msg["content"]
+        break
+
+    # 3. 有 tool_calls → 执行工具
+    tool_results = await executor.execute_tool_calls(msg["tool_calls"])
+
+    # 4. 结果注入消息列表，继续循环
+    messages.extend(tool_results)
+```
+
+#### 步数保护
+
+Agent 可能死循环——反复搜同一个东西、来回调工具不给出答案。`max_steps=10` 就是安全阀——到第 10 步还没结束，直接给用户降级回复："抱歉，我尝试了多次步骤仍未能完整回答您的问题。"
+
+#### 异常处理
+
+两个退路：
+```python
+except TimeoutException: → "请求超时，请稍后重试。"
+except Exception:        → "Agent 执行异常: {exc}"
+```
+
+工具执行失败也不会崩——把异常格式化成 `{"role": "tool", "content": "工具执行失败: ..."}`，写回 messages，**让 LLM 看到错误、自己决定备选方案**。
+
+#### 返回格式
+
+```python
+{
+    "answer": "最终答案文本",
+    "tool_calls": ["wiki_search", "rag_search"],  # 用了哪些工具
+    "steps": 3,                                     # 走了几步
+    "trace": [{step:1, action:"tool_call", tool:"wiki_search"}, ...]  # 推理轨迹
+}
+```
+
+trace 是调试利器——知道 Agent 每一步干了什么、哪个工具返回了什么。
+
+---
+
+#### 大白话总结（对话讲解版）
+
+**Agent vs 普通 RAG**：普通 RAG 一次性（搜→答）。Agent 多步循环——LLM 想一步、调工具、看结果、决定下一步，直到信息充足才回答。
+
+**Think → Act → Observe**：Think=LLM 决定需要什么信息。Act=调工具。Observe=看工具返回的结果。三步循环，每轮 LLM 都带着全部历史做决策。
+
+**步数保护**：max_steps=10 防死循环。工具执行失败不崩——错误信息写回对话，LLM 自己找备选方案。返回 trace 可调试每一步。
+
+---
+
+#### 面试常见问题 & 答案
+
+**Q1. Agent 和普通 RAG 有什么区别？什么场景该用 Agent？**
+
+普通 RAG：一次检索→一次生成。适合事实型问题（"Qdrant 的默认端口是多少？"）。Agent：多步推理→多次工具调用→最终回答。适合需要多步分析的问题（"比较 Qdrant 和 Milvus 的性能差异，给出选型建议"——需要分别搜两边的性能数据再做对比）。
+
+> **关键论点**：Agent = RAG + 自主决策。不是所有场景都需要 Agent，简单查一次直接答更高效。
+
+**Q2. Think-Act-Observe 循环怎么防止死循环？**
+
+步数保护 `max_steps=10`。此外，System Prompt 里明确要求"优先用最少的工具调用解决问题"、"最多执行 10 步工具调用后必须给出最终答案"。双重约束。
+
+> **关键论点**：步数保护是 Agent 的基础安全机制——不是可选的优化，是必须的安全阀。
+
+**Q3. 工具执行失败了 Agent 会崩吗？**
+
+不会。失败被捕获并格式化成 tool message 注入对话，LLM 看到错误后可以自行决定备选方案——"搜索结果返回错误，我尝试用另一个关键词重新搜索"。
+
+> **关键论点**：Agent 的容错设计 = 把错误也当做一种观察返回给 LLM，让 LLM 自主决策。
+
+**Q4. Agent Loop 的消息列表怎么管理？**
+
+每次循环 `messages` 列表不断增长：初始 system + history + user query → LLM 返回 assistant（含 tool_calls）→ 追加 tool results → 继续循环。`memory` 模块独立管理跨会话的持久化记忆，Agent Loop 只负责当前请求的上下文管理。
+
+> **关键论点**：消息列表是 Agent 的"工作台"——每一步都能看到前面所有的思考、行动和结果。
+
+---
+
+#### 新手名词解释
+
+**Agent（智能体）**
+
+能自主使用工具完成任务的 LLM 应用。核心是"理解任务 → 选择工具 → 执行 → 观察结果 → 继续或完成"的循环决策。
+
+**Think-Act-Observe**
+
+Agent 循环的三个阶段：Think=LLM 推理下一步需要的操作。Act=执行工具调用。Observe=把工具返回的结果作为新的观察注入对话。
+
+**步数保护（max_steps）**
+
+限制 Agent 最大工具调用次数。防止死循环（LLM 来回调工具不给答案）、控制延迟和成本。
+
+**推理轨迹（trace）**
+
+记录 Agent 每一步做了什么（调用哪个工具、什么参数、什么结果）。用于调试和可观测性。
+
+---
+
+#### 面试深度指南
+
+| 层次 | 内容 | 占比 |
+|------|------|------|
+| **第一层：必讲** | Agent vs RAG 区别 / Think-Act-Observe 循环 / 步数保护 | 80% |
+| **第二层：加分** | 消息列表管理 / 工具失败处理 / Agent 的 System Prompt 设计 | 追问展开 |
+| **第三层：点到为止** | ReAct 模式 / 规划-执行分离 / 多 Agent 协作 | 知道就行 |
+
+**3.2 控制在 3~4 分钟。**
