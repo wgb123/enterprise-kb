@@ -2596,3 +2596,142 @@ Agent 循环的三个阶段：Think=LLM 推理下一步需要的操作。Act=执
 | **第三层：点到为止** | ReAct 模式 / 规划-执行分离 / 多 Agent 协作 | 知道就行 |
 
 **3.2 控制在 3~4 分钟。**
+
+### 3.3 工具注册系统
+
+**文件：** `src/enterprise_kb/agent/tool_registry.py` — 89 行
+
+#### 单例注册表
+
+`ToolRegistry` 是全局唯一的工具注册中心——整个应用只此一份：
+
+```python
+class ToolRegistry:
+    _instance: Optional["ToolRegistry"] = None
+
+    def __new__(cls) -> "ToolRegistry":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._tools = {}
+        return cls._instance
+```
+
+**为什么单例？** Agent 启动时注册一次 wiki_search、rag_search、calculator、get_time，后续每次 Agent 循环直接用同一份工具列表。多份注册表 = 工具列表不一致 = Bug 源头。
+
+#### ToolSpec 四要素
+
+```python
+@dataclass
+class ToolSpec:
+    name: str                         # 工具名称，LLM 通过此名称调用
+    description: str                  # 自然语言描述，LLM 据此判断何时使用
+    parameters: dict[str, Any]        # JSON Schema 格式的参数定义
+    handler: Callable                 # 实际执行的异步函数
+    timeout: float = 30.0             # 工具执行超时
+    retry_on_error: bool = False      # 是否失败重试
+```
+
+#### 注册去重
+
+```python
+def register(self, spec: ToolSpec) -> None:
+    if spec.name in self._tools:
+        raise ValueError(f"工具 '{spec.name}' 已注册")
+    self._tools[spec.name] = spec
+```
+
+同名工具重复注册直接抛异常——不会静默覆盖。防的是"两个组件各注册了一个 calculator，后者覆盖前者但参数 schema 不同"。
+
+#### 转 OpenAI 格式
+
+`to_openai_tools()` 把内部 ToolSpec 转成 LLM 能理解的 tools 参数：
+
+```python
+{
+    "type": "function",
+    "function": {
+        "name": "calculator",
+        "description": "执行安全数学计算...",
+        "parameters": {"type": "object", "properties": {...}}
+    }
+}
+```
+
+这个名字/描述/参数格式就是 LLM 选工具时看的"菜单"。
+
+#### 注册表 vs 硬编码
+
+| 方式 | 加新工具 | 灵活度 |
+|------|---------|--------|
+| 注册表 | `registry.register(ToolSpec(...))` 一行 | ✅ 动态注册、可插拔 |
+| 硬编码 if/elif | 改源码，加分支 | ❌ 改一次冒一次风险 |
+
+注册表还支持 `unregister()` 动态移除——第三方插件也能注入自己的工具。
+
+---
+
+#### 大白话总结（对话讲解版）
+
+**单例注册表**：全局只一份工具列表。启动注册一次，后续循环直接读。多份 = 不一致 = Bug。
+
+**注册去重**：同名抛异常，不静默覆盖——防止两个组件各搞一个 calculator 参数格式不同。
+
+**转 OpenAI 格式**：`to_openai_tools()` 把内部结构转成 LLM 的"菜单"。注册表 vs 硬编码 = 一行注册 vs 改源码加分支。
+
+---
+
+#### 面试常见问题 & 答案
+
+**Q1. 为什么用单例模式？多实例会有什么问题？**
+
+全局唯一保证工具列表一致。多实例 = Agent A 有 4 个工具、Agent B 有 3 个 = 行为不一致。而且单例的 `__new__` 只加载一次工具定义，内存更省。
+
+> **关键论点**：单例保证全局状态一致性。工具注册表是典型的"全局资源"场景。
+
+**Q2. 重复注册同一个工具名会怎样？为什么不能静默覆盖？**
+
+抛 `ValueError`。不能静默覆盖——因为两个同名注册可能来自不同模块，参数 schema 不同。静默覆盖 = 你注册了 calculator_v2 但 Agent 实际调的是 v1 = 很难排查的 Bug。
+
+> **关键论点**：抛出异常 > 静默覆盖。失败了你知道问题在哪，覆盖了你永远找不到。
+
+**Q3. ToolSpec 的 description 为什么这么重要？**
+
+LLM 靠 description 判断"什么时候该用哪个工具"。description 只写"搜索"两个字 → LLM 不知道该用 wiki_search 还是 rag_search。写清楚"搜索 A 类编译式知识库（Wiki Markdown 文件），返回精确匹配的页面内容" → LLM 在需要查 Wiki 时自然选它。
+
+> **关键论点**：description 是 LLM 看到的唯一选型依据。写模糊 = LLM 选错。
+
+**Q4. 怎么支持第三方插件注册工具？**
+
+`register()` 是公开方法，任何模块都能调用。插件在启动时 `registry.register(plugin_tool)` 即可。`unregister()` 还支持卸载——插件可以做到热插拔。
+
+> **关键论点**：注册表 + 公开 API = 天然插件架构。不依赖依赖注入框架。
+
+---
+
+#### 新手名词解释
+
+**单例模式（Singleton）**
+
+保证类只有一个实例的设计模式。`__new__` 检查是否已存在实例，存在则返回已有实例而非新建。
+
+**注册表模式（Registry Pattern）**
+
+集中管理可扩展对象的模式。外部通过 `register()` 添加、`get()` 查询。比硬编码更灵活——新工具不需要改核心代码。
+
+**JSON Schema**
+
+描述 JSON 数据结构的规范。用于定义工具参数的字段名、类型、必填项。LLM 据此规范化传参。
+
+---
+
+#### 面试深度指南
+
+| 层次 | 内容 | 占比 |
+|------|------|------|
+| **第一层：必讲** | 单例模式 / ToolSpec 结构 / 注册去重 / description 重要性 | 80% |
+| **第二层：加分** | 动态注册/卸载 / OpenAI 工具格式 / 插件化扩展 | 追问展开 |
+| **第三层：点到为止** | 工具版本控制 / 工具依赖关系 / MCP 协议 | 知道就行 |
+
+**3.3 控制在 2~3 分钟。**
+
+### 3.4 对话记忆
