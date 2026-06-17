@@ -917,6 +917,22 @@ curl 'localhost:6333/collections/enterprise_kb/points/scroll?limit=5&with_payloa
 
 ---
 
+#### 大白话总结（对话讲解版）
+
+**MySQL 为什么不能做语义搜索？** MySQL 只认精确匹配——`WHERE title LIKE '%Qdrant%'`。搜"和这篇文章意思最接近的 10 篇"，MySQL 根本不会。Qdrant 存的是 1024 维坐标，按距离找最近的点。
+
+**三个核心概念**：Collection=表、Point=一行（值是1024维数组）、Payload=附带的标题/来源等元数据，可以 `filter(payload.source == "wikipedia")`。
+
+**HNSW 本质**：给向量之间建了一个多层导航图——顶层大跳、底层精确。不用和 100 万条向量逐一算距离，毫秒级找到最近邻。m=16 控制邻居数，ef_construct=200 控制建图质量。
+
+**为什么选 Qdrant 不选 Milvus**：Qdrant 一个 20MB Rust 二进制直接跑。Milvus 需要 etcd+MinIO+Pulsar 三个外部依赖。百万级数据、单机部署——Qdrant 刚好够用。
+
+**wait=True 的坑**：等于 COMMIT，每条都等落盘太慢。正确做法是攒 1000 条批量 upsert 一次 wait，IO 效率差几十倍。
+
+**BM25 不需要向量**：BM25 是纯文本关键词索引，不涉及任何神经网络。如果只用 BM25（`--skip-vectors`），BGE-M3 根本不加载，省 2GB 内存。BM25 管精确匹配（版本号、代码），向量管语义（同义词、模糊表达），两路互补。
+
+---
+
 #### 面试常见问题 & 答案
 
 **Q1. 向量数据库和传统数据库有什么区别？为什么不能只用 MySQL？**
