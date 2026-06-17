@@ -2311,3 +2311,145 @@ HTTP 协议上的单向推送机制。服务器通过长连接持续向客户端
 **2.3 控制在 2~3 分钟。模块二至此全部完成。**
 
 ---
+
+## 模块三：Agent 核心机制
+
+### 3.1 Function Calling
+
+**文件：** `src/enterprise_kb/agent/`（`agent_loop.py`、`default_tools.py`、`tool_registry.py`、`tool_executor.py`）
+
+#### 什么是 Function Calling
+
+之前的模块二里，LLM 只能**说话**——你问它答。Function Calling 让它能**做事**——调用工具、搜知识库、算数学题。
+
+```python
+# 普通对话：LLM 自己回答
+POST /chat/completions
+{
+  "messages": [{"role": "user", "content": "1+1等于几？"}]
+}
+# LLM 回复："1+1等于2" ← 可能算错
+
+# Function Calling：LLM 选择调用工具
+POST /chat/completions
+{
+  "messages": [{"role": "user", "content": "1+1等于几？"}],
+  "tools": [{
+    "type": "function",
+    "function": {
+      "name": "calculator",
+      "description": "执行数学计算",
+      "parameters": {"expression": {"type": "string"}}
+    }
+  }]
+}
+# LLM 不直接回答，而是返回：
+{
+  "tool_calls": [{
+    "id": "call_001",
+    "function": {"name": "calculator", "arguments": "{\"expression\":\"1+1\"}"}
+  }]
+}
+```
+
+LLM 不是自己算——它**选择调用 calculator 工具，然后把数学交给真正的 Python 代码算**。结果注入回消息列表，LLM 再根据结果组织答案。
+
+#### 一个工具怎么定义
+
+ToolSpec 四要素：
+
+| 字段 | 写给谁看 | 为什么重要 |
+|------|---------|-----------|
+| name | LLM | LLM 靠名字调用 |
+| description | LLM | LLM 据此判断"这工具能不能解决用户问题" |
+| parameters JSON Schema | LLM | LLM 按这个格式传参数 |
+| handler | 我们自己 | 真实业务逻辑 |
+
+**description 太短或太模糊 → LLM 选错工具或根本不选。** 这是 Function Calling 最常见的坑。
+
+#### 项目里的 4 个默认工具
+
+| 工具 | 做什么 | 安全措施 |
+|------|--------|---------|
+| wiki_search | 搜索 A 类知识库（Wiki） | — |
+| rag_search | 检索 B 类 HybridRAG | — |
+| calculator | 安全四则运算 | AST 白名单，禁止 `eval` 执行任意代码 |
+| get_time | 获取当前时间 | — |
+
+calculator 的安全设计：用 `ast.parse` 遍历 AST，只允许 `Expression/BinOp/UnaryOp/Constant` 等白名单节点。`eval("__import__('os').system('rm -rf /')")` 会被 AST 检查直接拦截。
+
+#### 工具执行和结果注入
+
+LLM 选了工具 → `ToolExecutor` 找到 handler → 执行 → 格式化成 `{"role": "tool", "content": "..."}` → 追加到 messages → LLM 看到结果决定下一步。支持 **`asyncio.gather` 并行执行多个独立工具**。
+
+---
+
+#### 大白话总结（对话讲解版）
+
+**Function Calling = 让 LLM 从"说"变成"做"。** LLM 不自己算数学、不自己搜知识库——它选工具、传参数，真正的执行交给 Python 代码。结果写回对话，LLM 再根据结果组织回复。
+
+**一个工具四要素**：名字、描述（给LLM判断用）、参数格式（JSON Schema）、执行函数（我们写）。描述写太短 → LLM 选错工具，这是最常见的坑。
+
+**calculator 不能裸 eval**——用 AST 白名单拦截危险代码。`__import__('os').system('rm -rf /')` 直接拦。
+
+---
+
+#### 面试常见问题 & 答案
+
+**Q1. 什么是 Function Calling？和普通对话有什么区别？**
+
+普通对话：LLM 凭训练记忆直接回答。Function Calling：请求里带 `tools` 参数，LLM 不直接回答，返回 `tool_calls`——选择哪个工具、传什么参数。你的代码执行工具，结果写回对话，LLM 再组织答案。
+
+> **关键论点**：Function Calling 的本质是 LLM 学会"我知道自己不擅长这个，交给专门的工具来做"。
+
+**Q2. 一个工具的定义包含哪些部分？哪个最容易被忽视？**
+
+name、description、parameters（JSON Schema）、handler。**description 最容易被忽视**——写太短（"搜索"两个字），LLM 不知道这工具能搜什么、什么时候该用。应该写清楚：搜什么类型的数据、返回什么格式、适用什么场景。
+
+> **关键论点**：description 是 LLM 做决策的唯一依据——写得好不好直接决定工具调用成功率。
+
+**Q3. calculator 为什么不能直接用 eval？怎么安全实现？**
+
+裸 `eval` 可以执行任意 Python 代码——`eval("__import__('os').system('rm -rf /')")` 直接删库。安全方案：用 `ast.parse` 解析表达式 → 遍历 AST 节点 → 只允许白名单类型（Expression、BinOp、Constant 等）→ 用空 `__builtins__` 的 eval 执行。
+
+> **关键论点**：任何接受用户输入的代码执行都要做沙箱。AST 白名单是最小权限原则的体现。
+
+**Q4. 一次可以调用多个工具吗？怎么处理依赖关系？**
+
+可以。`asyncio.gather` 并行执行——前提是工具之间**互不依赖**。如果工具 B 需要工具 A 的结果，LLM 应该在**下一轮**再调用 B——Agent Loop 的循环机制天然支持这种串行依赖。
+
+> **关键论点**：并行调用独立工具提效，串行依赖交给 Agent Loop 的下一轮。LLM 自己判断先后。
+
+---
+
+#### 新手名词解释
+
+**Function Calling**
+
+LLM 不直接回答，而是返回一个函数调用请求（tool_call）的能力。请求包含工具名和 JSON 参数，由外部代码执行后把结果注回对话。
+
+**tool_call**
+
+LLM 返回的函数调用指令：`{"id": "call_xxx", "function": {"name": "calculator", "arguments": "{...}"}}`。包含唯一 ID（后续 tool message 对应）、工具名、JSON 参数。
+
+**JSON Schema**
+
+描述参数格式的标准。如 `{"type": "object", "properties": {"expression": {"type": "string"}}, "required": ["expression"]}`。LLM 据此知道要传什么参数、什么类型。
+
+**tool message**
+
+工具执行结果注入到消息列表时用的 role：`{"role": "tool", "tool_call_id": "call_xxx", "content": "计算结果: 1+1=2"}`。LLM 通过 `tool_call_id` 对应到之前发出的 tool_call。
+
+---
+
+#### 面试深度指南
+
+| 层次 | 内容 | 占比 |
+|------|------|------|
+| **第一层：必讲** | Function Calling 概念 / 工具四要素 / 和普通对话的区别 | 80% |
+| **第二层：加分** | calculator 安全沙箱 / description 写法 / 并行调用和依赖处理 | 追问展开 |
+| **第三层：点到为止** | OpenAI tool_choice 参数 / 流式 Function Calling / MCP 协议 | 知道就行 |
+
+**3.1 控制在 2~3 分钟。**
+
+---
