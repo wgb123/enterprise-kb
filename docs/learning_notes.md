@@ -2880,3 +2880,258 @@ memory.add_message("assistant", answer)
 | **第三层：点到为止** | 长期记忆向量化 / 记忆总结 / RAG + 记忆的融合 | 知道就行 |
 
 **3.4 控制在 2~3 分钟。模块三至此全部完成。**
+
+---
+
+## 模块四：企业级工程化
+
+### 4.1 FastAPI 后端
+
+**文件：** `src/enterprise_kb/main.py`、`src/enterprise_kb/api/routes.py` — 289 行
+
+#### 启动入口
+
+```bash
+uvicorn enterprise_kb.main:app --reload --port 8000
+```
+
+`main.py` 用 `lifespan` 异步上下文管理器管理启停：
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动：预热 Wiki → 初始化 Qdrant → 注册 Agent 工具
+    wiki_nav = get_wiki_navigator()
+    await wiki_nav.load()
+    hybrid = get_hybrid_retriever()
+    await hybrid.vector_store.ensure_collection()
+    register_default_tools(wiki_nav=wiki_nav, hybrid_retriever=hybrid)
+    yield
+    # 关闭：释放 Qdrant 连接
+    await hybrid.vector_store.close()
+```
+
+每个启动步骤都套了 try/except——Wiki 加载失败不阻塞 Qdrant 初始化，Qdrant 连不上不阻塞 Agent 工具注册。**优雅降级贯穿到底。**
+
+#### 路由注册
+
+```python
+router = APIRouter(prefix="/api/v1", tags=["Knowledge Base"])
+app.include_router(router)
+```
+
+#### 5 个端点
+
+| 端点 | 做什么 | 管道 |
+|------|--------|------|
+| `GET /api/v1/health` | 健康检查 | 直接 `{"status":"ok"}` |
+| `POST /api/v1/ingest` | 文档入库 | 解析→分块→嵌入→存储 |
+| `POST /api/v1/query` | 知识库查询 | 意图分类→Wiki/HybridRAG→融合→生成 |
+| `GET /api/v1/wiki` | Wiki 搜索 | 全文搜索 + 标签过滤 |
+| `GET /api/v1/wiki/{path}` | Wiki 页面 | 按路径返回完整页面 |
+
+#### Depends 依赖注入
+
+```python
+@router.post("/query")
+async def query(
+    wiki_nav: WikiNavigator = Depends(get_wiki_navigator),
+    hybrid: HybridRetriever = Depends(get_hybrid_retriever),
+) -> dict:
+```
+
+`Depends` 三大好处：① 路由函数不自己 new 对象，测试时换 mock 一行不改；② 框架管理单例复用，不会每次请求重新加载 BGE-M3；③ 依赖链条清晰——`get_wiki_navigator` → `get_hybrid_retriever` → 逐级注入。
+
+#### Pydantic v2 请求/响应模型
+
+`schemas.py` 定义所有数据模型。非法请求在到达路由函数前就被 FastAPI 拦截并返回 422。
+
+#### Swagger 自动文档
+
+启动后 `/docs` 自动生成交互式 API 文档——5 个端点、请求/响应模型、Try it out 功能。不需要手写 OpenAPI 规格。
+
+---
+
+#### 大白话总结（对话讲解版）
+
+**lifespan 管理启停**：启动预热 Wiki/Qdrant/Agent 工具，关闭释放连接。每步独立 try/except，挂了不阻塞其他。
+
+**Depends 依赖注入**：路由只声明"我需要 WikiNavigator"，框架自动给。好处 = 测试时换 mock 不改源码。
+
+**Swagger 自动文档**：`/docs` 开箱即用，所有端点可交互测试。
+
+---
+
+#### 面试常见问题 & 答案
+
+**Q1. `lifespan` 和 `@app.on_event("startup")` 有什么区别？**
+
+`lifespan` 是 FastAPI 推荐的新方式——异步上下文管理器，启动和关闭代码在一起，逻辑更清晰。`on_event` 是旧版，启动和关闭分离，FastAPI 已不推荐。
+
+> **关键论点**：lifespan 把启停逻辑聚合在一个上下文管理器里，代码内聚性更好。
+
+**Q2. `Depends` 依赖注入解决了什么问题？**
+
+不用在路由函数里 `WikiNavigator()` new 对象——① 测试时 `app.dependency_overrides` 替换 mock，源码不改；② 框架自动复用单例，不会每次请求加载 2GB 模型；③ 依赖声明即文档——看函数签名就知道这个端点需要哪些组件。
+
+> **关键论点**：Depends = 声明式依赖管理。测试友好、性能友好、可读性友好。
+
+**Q3. 为什么要给每个启动步骤单独 try/except？**
+
+优雅降级——Wiki 加载失败不影响 Qdrant 初始化，Qdrant 连不上不影响 Agent 工具注册。最坏情况：三个都失败，服务仍然启动，只是功能降级。和前面所有模块的降级哲学一致。
+
+> **关键论点**：单体启动不等于全或无。降级启动 = 有最好，没有也能跑。
+
+**Q4. Swagger 文档需要手写吗？怎么生成？**
+
+不需要。FastAPI 从路由函数签名、Pydantic 模型、docstring 自动生成 OpenAPI 规范。`/docs` 用 Swagger UI 渲染。加新端点 = 加了新路由函数 → 文档自动更新，零额外工作。
+
+> **关键论点**：FastAPI 的文档生成是零成本的——代码即文档。
+
+---
+
+#### 新手名词解释
+
+**FastAPI**
+
+Python 异步 Web 框架。基于 Starlette + Pydantic，自动生成 OpenAPI 文档。`uvicorn` 是它的 ASGI 服务器。
+
+**lifespan**
+
+FastAPI 应用的生命周期管理器。用 `@asynccontextmanager` 包裹 yield 前后的启动/关闭代码。
+
+**Depends**
+
+FastAPI 的依赖注入机制。路由函数参数声明 `= Depends(get_xxx)`，框架自动调用 `get_xxx()` 注入实例。支持嵌套依赖和缓存复用。
+
+**Swagger / OpenAPI**
+
+REST API 的标准化描述格式。Swagger UI 把它渲染成交互式文档。FastAPI 自动从代码生成。
+
+---
+
+#### 面试深度指南
+
+| 层次 | 内容 | 占比 |
+|------|------|------|
+| **第一层：必讲** | lifespan 启停管理 / Depends 注入 / Swagger 文档 | 80% |
+| **第二层：加分** | 优雅降级启动 / 依赖注入对测试的好处 | 追问展开 |
+| **第三层：点到为止** | 中间件 / CORS / WebSocket 路由 | 知道就行 |
+
+**4.1 控制在 3~4 分钟。**
+
+---
+
+### 4.2 配置管理
+
+**文件：** `src/enterprise_kb/config.py` — 约 120 行
+
+#### pydantic-settings：从 .env 到代码
+
+```python
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env")
+
+    qdrant_host: str = Field(default="localhost", alias="QDRANT_HOST")
+    qdrant_port: int = Field(default=6333, alias="QDRANT_PORT")
+    chunk_size: int = Field(default=512, alias="CHUNK_SIZE")
+    vllm_temperature: float = Field(default=0.3, alias="VLLM_TEMPERATURE")
+    # ... 30+ 配置项
+```
+
+`.env` 文件里写 `QDRANT_HOST=192.168.1.100` → `settings.qdrant_host` 自动变成 `"192.168.1.100"`。不改代码，只改文件。
+
+#### alias 机制
+
+Python 变量名用 `snake_case`（`qdrant_host`），环境变量用 `UPPER_CASE`（`QDRANT_HOST`）。`alias` 做映射——两边各自遵循自己生态的命名规范，不冲突。
+
+#### 字段验证器
+
+```python
+@field_validator("log_level")
+def validate_log_level(cls, v):
+    allowed = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+    if v.upper() not in allowed:
+        raise ValueError(f"Invalid: {v}")
+    return v.upper()
+```
+
+启动时就校验——不会等到运行时才发现 `LOG_LEVEL=VERBOSE` 无效。
+
+#### 计算属性
+
+```python
+@property
+def qdrant_url(self) -> str:
+    return f"http://{self.qdrant_host}:{self.qdrant_port}"
+
+@property
+def use_llama_parse(self) -> bool:
+    return bool(self.llama_cloud_api_key)
+```
+
+不存冗余字段。`qdrant_url` 是从 host + port 动态算的。`use_llama_parse` 是从 API Key 是否为空推断的。
+
+#### 全局单例
+
+```python
+settings = Settings()  # 模块级全局单例
+```
+
+整个应用 `from config import settings` 访问同一份配置。一处改 .env 全局生效。
+
+---
+
+#### 大白话总结（对话讲解版）
+
+**pydantic-settings** 从 `.env` 自动加载，alias 做变量名映射。字段验证器启动时校验，不等到运行时炸。计算属性动态生成不存冗余。全局单例一份配置到处用。
+
+---
+
+#### 面试常见问题 & 答案
+
+**Q1. 配置怎么管理？多环境怎么办？**
+
+pydantic-settings + `.env`。dev/staging/prod 各一个 `.env` 文件，通过 `ENV=production` 环境变量指定加载哪个。Docker 部署时用 `-e QDRANT_HOST=...` 注入环境变量覆盖文件值。
+
+> **关键论点**：.env 管理默认值，环境变量覆盖差异值。12-Factor App 第三条。
+
+**Q2. alias 解决了什么问题？**
+
+Python 习惯 `snake_case`，环境变量习惯 `UPPER_CASE`。`alias` 让两边各用各的规范，不用一方迁就另一方。而且环境变量 `QDRANT_HOST` 比 `qdrant_host` 在 Docker/K8s 里更好辨识。
+
+> **关键论点**：alias = 生态适配。不是"统一命名"，是"各自遵循自己的习惯"。
+
+**Q3. 字段验证器什么时候跑？配错了会怎样？**
+
+导入 `Settings()` 时就跑。`LOG_LEVEL=VERBOSE` → 应用直接起不来，不会带着错误配置运行到一半才炸。
+
+> **关键论点**：Fail Fast——启动时校验，不让坏配置进入运行时。
+
+---
+
+#### 新手名词解释
+
+**pydantic-settings**
+
+pydantic 的扩展库，专门处理从环境变量 / .env 文件加载配置。支持类型转换、字段验证、alias 映射。
+
+**.env 文件**
+
+存放环境变量的纯文本文件。`KEY=VALUE` 格式，一行一个。不提交到 Git（`.gitignore`），只保留 `.env.example` 作为模板。
+
+**alias（别名）**
+
+pydantic Field 的参数。`Field(alias="QDRANT_HOST")` 让代码里用 `qdrant_host` 但环境变量里写 `QDRANT_HOST`。
+
+---
+
+#### 面试深度指南
+
+| 层次 | 内容 | 占比 |
+|------|------|------|
+| **第一层：必讲** | pydantic-settings 加载机制 / alias / 字段验证 | 80% |
+| **第二层：加分** | 多环境配置 / 计算属性 / 12-Factor App | 追问展开 |
+| **第三层：点到为止** | 配置热更新 / Vault 密钥管理 | 知道就行 |
+
+**4.2 控制在 2~3 分钟。**
