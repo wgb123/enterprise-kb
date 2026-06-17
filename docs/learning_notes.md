@@ -917,6 +917,147 @@ curl 'localhost:6333/collections/enterprise_kb/points/scroll?limit=5&with_payloa
 
 ---
 
+#### 面试常见问题 & 答案
+
+**Q1. 向量数据库和传统数据库有什么区别？为什么不能只用 MySQL？**
+
+传统数据库靠精确匹配查数据——`WHERE title LIKE '%Qdrant%'`。向量数据库靠距离查数据——"找和这个 1024 维向量最近的 10 个点"。
+
+MySQL 根本没法做这件事：对 100 万行数据，每行算一遍 1024 维余弦距离，一次查询要跑几分钟。Qdrant 用 HNSW 索引把复杂度从 O(N) 降到 O(logN)，毫秒级。
+
+| | MySQL | Qdrant |
+|------|------|------|
+| 查"标题含 Qdrant 的文章" | ✅ | ✅（payload 过滤） |
+| 查"和这篇文章意思类似的文章" | ❌ | ✅ |
+
+**两者互补，不是替代。** 我们的前端搜"Qdrant 配置"→ Qdrant 做语义检索 → Qdrant 返回的 payload 里有 source/title 等元数据 → 这就是传统字段的用途。
+
+> **关键论点**：MySQL 管精确过滤，Qdrant 管语义检索，各司其职。
+
+**Q2. HNSW 是什么？为什么不用暴力搜索？**
+
+暴力搜索 = 和数据库里 100 万条向量逐一算距离，太慢。HNSW = 给向量之间建一个"导航图"。
+
+直观理解：你要在 100 万人的城市里找到离你最近的快递员。暴力 = 挨家挨户敲门。HNSW = 你先找到自己街区的快递站 → 再问到隔壁区有没有更近的 → 跳过去。不用查整个人口。
+
+```
+HNSW 结构：
+  顶层（稀疏）→ 入口点，大跳
+  中间层（中等）→ 缩小范围
+  底层（密集）→ 找到最近邻居
+```
+
+**m=16**：每个节点至少连 16 个邻居。越大 → 召回率越高，但图越大、写入越慢。
+**ef_construct=200**：建图时搜多深。越大 → 图质量越好，但建得越慢。
+
+> **关键论点**：HNSW 就是"跳过不相关的，直奔目标区"——多层跳表+贪心搜索。不用理解图论也能讲。
+
+**Q3. 为什么选 Qdrant 而不是 Milvus、Weaviate、Pinecone？**
+
+选型逻辑：场景匹配 > 功能堆砌。
+
+| | Qdrant | Milvus | Weaviate | Pinecone |
+|------|------|------|------|------|
+| 部署 | 单文件 20MB Rust 二进制 | 需要 etcd+MinIO+Pulsar 三个依赖 | Go 二进制，也轻量 | 仅 SaaS |
+| 百万级性能 | ✅ 优异 | ✅ 优异 | ✅ 好 | ✅ 好 |
+| 数据本地 | ✅ 本地二进制 | ✅ 本地部署 | ✅ 本地部署 | ❌ 云端 |
+| 学习成本 | 极低 | 中等 | 中等 | 最低（全托管） |
+
+**我们选 Qdrant 的理由**：百万级数据、单机部署、不要三个外部依赖启动。Milvus 强但需要 Kubernetes 级别的运维；Weaviate 也轻量但社区和中文支持不如 Qdrant；Pinecone 云端数据不出内网不允许。
+
+> **关键论点**：选型不是选功能最多的，是选刚好够用的。Qdrant 20MB 二进制直接跑，零运维。
+
+**Q4. Collection 怎么设计？vector_size、distance 这些参数怎么选？**
+
+```python
+vectors_config=VectorParams(
+    size=1024,                # = BGE-M3 输出维度，不一致直接报错
+    distance=Distance.COSINE, # 向量已 L2 归一化 → cosine=点积，最快
+)
+```
+
+**size 必须和嵌入模型输出维度一模一样。** 如果 BGE-M3 输出 1024 维，Collection 设了 768 → `upsert` 直接抛异常。
+
+**为什么用 Cosine 不用 Euclid？** 归一化后 cosine = 点积（一次乘加），Euclid 要多一步开平方。效果一致但 cosine 更快。
+
+> **关键论点**：Collection 参数不是独立决策——size 跟着模型走，distance 跟着归一化走。环环相扣。
+
+**Q5. 为什么 upsert 要 `wait=True`？不设会怎样？**
+
+`wait=True` 等价于数据库的 COMMIT——确认数据落盘后再返回。不设的话 Qdrant 可能还在内存里没写磁盘，服务重启数据丢失。
+
+但大量导入时每条都 wait 太慢——450 万维基百科逐条 upsert 每条等一次磁盘 IO = 15 天。正确做法：攒够 N 条（如 1000）批量 upsert 一次 wait。
+
+```python
+# 错误：每条都 wait
+for point in points:
+    await client.upsert([point], wait=True)  # 极慢
+
+# 正确：批量 upsert
+batch = []
+for i, point in enumerate(points):
+    batch.append(point)
+    if len(batch) >= 1000:
+        await client.upsert(batch, wait=True)
+        batch = []
+```
+
+> **关键论点**：wait=True 保证数据安全，但批量比逐条的 IO 效率高几十倍。
+
+**Q6. Qdrant 服务挂了怎么办？数据还在吗？**
+
+Qdrant 数据存在 `qdrant_data/storage/` 目录下——RocksDB 持久化。服务重启数据还在。
+
+但要避免单点故障，生产环境需要：
+- Qdrant 快照（`/snapshots` API）按时备份
+- 或 Qdrant 集群模式（Raft 协议，3 节点）
+
+当前项目单机部署，定期快照备份是够的。
+
+> **关键论点**：Qdrant 不是 Redis——数据不是纯内存，RocksDB 落地。挂了重启就行。
+
+---
+
+#### 新手名词解释
+
+**ANN（Approximate Nearest Neighbor / 近似最近邻）**
+
+在大量向量中"近似"找到最近的几个，而不是"精确"找到。精度换速度——100 万向量精确找要一分钟，ANN 用索引毫秒级。HNSW 是最主流的 ANN 算法之一。
+
+**Collection（集合）**
+
+Qdrant 里的一张"表"。每个 Collection 有固定的向量维度（size）和距离度量方式（distance）。一个项目通常一个 Collection，存所有文档的向量。
+
+**Point（数据点）**
+
+Collection 里的一行记录。每个 Point 有 id、vector、可选的 payload。相当于 MySQL 里的一行——但"值"是一个 1024 维的浮点数数组。
+
+**Payload（负载 / 元数据）**
+
+附在 Point 上的额外信息——标题、来源、创建时间、标签等。搜索时可以 `filter(payload.source == "wikipedia")` 只搜特定来源的数据。Qdrant 对 payload 字段建了索引，过滤很快。
+
+**HNSW（Hierarchical Navigable Small World）**
+
+多层导航图索引算法。底层是密集的最近邻图，上层是稀疏的"快速通道"。搜索时从顶层大跳 → 逐层缩小范围 → 底层精确找到最近邻居。
+
+**ef（effective factor）**
+
+搜索时扫描的候选节点数。ef 越大 → 搜得越仔细 → 召回率越高，但延迟越大。`ef_construct` 是建索引时的 ef，`ef_search` 是搜索时的 ef（默认也设为 200）。
+
+---
+
+#### 面试深度指南
+
+| 层次 | 内容 | 占比 |
+|------|------|------|
+| **第一层：必讲** | 向量 vs 传统数据库 / Collection/Point/Payload 三个概念 / HNSW 直观理解 / Qdrant 选型理由 | 80% |
+| **第二层：加分** | m/ef_construct 参数影响 / wait=True 的批量策略 / Cosine 为什么比 Euclid 快 | 追问展开 |
+| **第三层：点到为止** | 快照备份 / Raft 集群 / 量化索引（PQ、SQ） | 知道就行 |
+
+**1.4 控制在 3~4 分钟。**
+
+---
+
 ### 1.5 BM25 关键词索引
 
 **文件：** `src/enterprise_kb/storage/bm25_index.py` — 约 170 行
