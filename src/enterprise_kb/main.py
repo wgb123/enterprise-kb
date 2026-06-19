@@ -12,6 +12,7 @@ from enterprise_kb.agent import ToolRegistry
 from enterprise_kb.agent.default_tools import register_default_tools
 from enterprise_kb.api.dependencies import get_hybrid_retriever, get_wiki_navigator
 from enterprise_kb.api.routes import router
+from enterprise_kb.langchain.lc_routes import router as lc_router
 from enterprise_kb.config import settings
 from enterprise_kb.utils.logger import logger
 
@@ -82,3 +83,4 @@ app = FastAPI(
 
 # 注册路由
 app.include_router(router)
+app.include_router(lc_router)
