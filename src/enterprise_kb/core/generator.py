@@ -4,7 +4,8 @@
 引用来源的、忠实于上下文的最终答案。
 """
 
-from typing import Optional
+import json
+from typing import AsyncGenerator, Optional
 
 import httpx
 
@@ -117,6 +118,85 @@ class VLLMGenerator(BaseGenerator):
                 query,
                 context_chunks,
                 reason=f"生成失败: {exc}",
+            )
+
+    async def generate_stream(
+        self,
+        query: str,
+        context_chunks: list[RetrievedChunk],
+        system_prompt: Optional[str] = None,
+    ) -> AsyncGenerator[str, None]:
+        """流式生成基于上下文的答案，逐 token 产出。
+
+        Args:
+            query: 用户原始查询。
+            context_chunks: 检索并融合后的上下文块列表。
+            system_prompt: 可选的系统提示词覆盖。
+
+        Yields:
+            每个生成 token 的内容字符串。
+        """
+        context_text = self._format_context(context_chunks)
+        user_prompt = self._build_user_prompt(query, context_text)
+
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": True,
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                async with client.stream(
+                    "POST", self.api_url, json=payload, headers=headers
+                ) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if line.startswith("data: "):
+                            data_str = line[6:]
+                            if data_str.strip() == "[DONE]":
+                                break
+                            try:
+                                data = json.loads(data_str)
+                                token = (
+                                    data.get("choices", [{}])[0]
+                                    .get("delta", {})
+                                    .get("content", "")
+                                )
+                                if token:
+                                    yield token
+                            except json.JSONDecodeError:
+                                continue
+
+        except httpx.TimeoutException:
+            logger.warning("vLLM stream timed out after %ds", self.timeout)
+            yield self._fallback_response(
+                query,
+                context_chunks,
+                reason="vLLM 请求超时",
+            )
+        except httpx.HTTPStatusError as exc:
+            logger.warning("vLLM stream HTTP error: %s", exc)
+            yield self._fallback_response(
+                query,
+                context_chunks,
+                reason=f"vLLM 服务异常 ({exc.response.status_code})",
+            )
+        except Exception as exc:
+            logger.exception("vLLM stream generation failed")
+            yield self._fallback_response(
+                query,
+                context_chunks,
+                reason=f"流式生成失败: {exc}",
             )
 
     @staticmethod

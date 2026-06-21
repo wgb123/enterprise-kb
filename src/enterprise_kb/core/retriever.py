@@ -3,6 +3,7 @@
 实现了 B 类记忆层的完整检索管道。
 """
 
+from pathlib import Path
 from typing import Any, Optional
 
 from qdrant_client.models import PointStruct
@@ -29,12 +30,25 @@ class HybridRetriever(BaseRetriever):
         vector_store: Optional[QdrantStore] = None,
         bm25_index: Optional[BM25Index] = None,
         reranker: Optional[BGEReranker] = None,
+        bm25_persist_path: Optional[str | Path] = None,
     ) -> None:
         self.embedder = embedder or BGEM3Embedder()
         self.vector_store = vector_store or QdrantStore()
         self.bm25_index = bm25_index or BM25Index()
         self.reranker = reranker or BGEReranker()
         self._ingested = False
+
+        # 如果传入了自定义 BM25 持久化路径，替换默认路径
+        if bm25_persist_path:
+            self.bm25_index._persist_path = Path(bm25_persist_path)
+
+        # 自动加载持久化的 BM25 索引
+        try:
+            loaded = self.bm25_index.load()
+            if loaded:
+                logger.info("Auto-loaded BM25 index: %d docs", self.bm25_index.size)
+        except Exception:
+            pass
 
     # ── 文档入库 ──
 
@@ -149,6 +163,8 @@ class HybridRetriever(BaseRetriever):
                     document_id=str(doc.get("chunk_id", "")),
                     chunk_id=str(doc.get("chunk_id", "")),
                     score=doc.get("rerank_score", doc.get("score", 0.0)),
+                    vector_score=doc.get("vector_score", 0.0),
+                    bm25_score=doc.get("bm25_score", 0.0),
                     metadata=doc.get("metadata", {}),
                 )
             )

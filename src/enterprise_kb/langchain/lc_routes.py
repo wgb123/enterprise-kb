@@ -19,9 +19,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from enterprise_kb.api.dependencies import (
-    get_wiki_navigator,
+    get_context_fusion,
     get_hybrid_retriever,
-    get_fusion_service,
+    get_wiki_navigator,
 )
 from enterprise_kb.core.wiki_navigator import WikiNavigator
 from enterprise_kb.core.retriever import HybridRetriever
@@ -83,7 +83,7 @@ async def langchain_query(
     req: QueryRequest,
     wiki_nav: WikiNavigator = Depends(get_wiki_navigator),
     retriever: HybridRetriever = Depends(get_hybrid_retriever),
-    fusion: ContextFusion = Depends(get_fusion_service),
+    fusion: ContextFusion = Depends(get_context_fusion),
     generator: LcGenerator = Depends(get_lc_generator),
 ):
     """LangChain 版 RAG 问答（非流式）。

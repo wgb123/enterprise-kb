@@ -8,9 +8,9 @@
   ``llamaindex`` — LlamaIndexRouter，LLM 语义路由，需安装依赖
 """
 
-from functools import lru_cache
+from pathlib import Path
 
-from fastapi import Request
+from functools import lru_cache
 
 from enterprise_kb.config import settings
 from enterprise_kb.interfaces.router import BaseRouter
@@ -50,8 +50,14 @@ def get_wiki_navigator() -> WikiNavigator:
 
 @lru_cache(maxsize=1)
 def get_hybrid_retriever() -> HybridRetriever:
-    """获取（单例）HybridRAG 检索器实例。"""
-    return HybridRetriever()
+    """获取（单例）HybridRAG 检索器实例。
+
+    自动加载持久化的 BM25 索引。
+    """
+    # BM25 持久化路径
+    project_root = Path(__file__).resolve().parent.parent.parent.parent
+    bm25_path = project_root / "data" / "wiki_bm25.pkl"
+    return HybridRetriever(bm25_persist_path=str(bm25_path))
 
 
 @lru_cache(maxsize=1)

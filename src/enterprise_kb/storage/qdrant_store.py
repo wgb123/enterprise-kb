@@ -154,9 +154,10 @@ class QdrantStore:
                 )
             qdrant_filter = Filter(must=conditions)  # type: ignore[arg-type]
 
-        hits = await client.search(
+        # qdrant-client >=1.18 uses query_points() instead of the removed search()
+        hits = await client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             limit=top_k,
             score_threshold=score_threshold,
             query_filter=qdrant_filter,
@@ -169,7 +170,7 @@ class QdrantStore:
                 "score": hit.score,
                 "payload": hit.payload or {},
             }
-            for hit in hits
+            for hit in hits.points
         ]
 
     async def scroll_all(

@@ -112,12 +112,19 @@ class BGEReranker:
         texts: list[str],
     ) -> list[float]:
         """使用本地 CrossEncoder 模型计算分数。"""
+        if not texts:
+            return []
+
         loop = asyncio.get_running_loop()
 
         pairs = [[query, text] for text in texts]
 
         def _run() -> list[float]:
-            return self._model.compute_score(pairs, normalize=True)  # type: ignore[union-attr]
+            try:
+                return self._model.compute_score(pairs, normalize=True)  # type: ignore[union-attr]
+            except Exception as exc:
+                logger.warning("Reranker compute_score failed: %s. Returning uniform scores.", exc)
+                return [0.0] * len(pairs)
 
         return await loop.run_in_executor(None, _run)
 

@@ -3,14 +3,17 @@
 端点一览：
 - ``POST /api/v1/ingest`` — 文档入库
 - ``POST /api/v1/query`` — 查询知识库
+- ``POST /api/v1/query/stream`` — 流式查询（SSE）
 - ``GET  /api/v1/wiki`` — Wiki 页面导航/搜索
 - ``GET  /api/v1/wiki/{path:path}`` — 获取特定 Wiki 页面
 - ``GET  /api/v1/health`` — 健康检查
 """
 
-from typing import Any
+import json
+from typing import Any, AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 
 from enterprise_kb.agent import AgentLoop, MemoryManager
 from enterprise_kb.api.dependencies import (
@@ -169,6 +172,8 @@ async def query_knowledge_base(
             "source": c.source,
             "document_id": c.document_id,
             "score": round(c.score, 4),
+            "vector_score": round(c.vector_score, 4),
+            "bm25_score": round(c.bm25_score, 4),
             "metadata": c.metadata,
         }
         for c in fused_chunks[:5]
@@ -181,6 +186,110 @@ async def query_knowledge_base(
         "sources": sources,
         "total_chunks": len(fused_chunks),
     }
+
+
+# ─── 流式查询（SSE） ───
+
+
+async def _stream_query_events(
+    query: str,
+    top_k: int,
+    router_service: BaseRouter,
+    wiki_nav: WikiNavigator,
+    hybrid_retriever: HybridRetriever,
+    fusion: ContextFusion,
+    generator: VLLMGenerator,
+) -> AsyncGenerator[bytes, None]:
+    """流式查询的内部生成器，产出 SSE 事件。"""
+    # 1. 意图分类
+    intent = router_service.classify(query)
+    logger.info("Query intent: %s — %s", intent.value, query[:80])
+
+    # 2. 分发引擎
+    results = []
+    if router_service.should_use_wiki(query):
+        logger.info("Routing to Wiki engine: %s", query[:60])
+        wiki_result = await wiki_nav.query(query, top_k=top_k)
+        results.append(wiki_result)
+
+    if router_service.should_use_hybrid_rag(query):
+        logger.info("Routing to HybridRAG engine: %s", query[:60])
+        rag_result = await hybrid_retriever.retrieve(query, top_k=top_k)
+        results.append(rag_result)
+
+    # 3. 融合
+    fused_chunks = fusion.fuse(results, max_chunks=15)
+
+    sources_data = [
+        {
+            "content": c.content[:300],
+            "source": c.source,
+            "document_id": c.document_id,
+            "score": round(c.score, 4),
+            "vector_score": round(c.vector_score, 4),
+            "bm25_score": round(c.bm25_score, 4),
+            "metadata": c.metadata,
+        }
+        for c in fused_chunks[:5]
+    ]
+
+    # 发送元数据事件
+    meta = {
+        "type": "metadata",
+        "intent": intent.value,
+        "total_chunks": len(fused_chunks),
+        "sources": sources_data,
+    }
+    yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n".encode("utf-8")
+
+    # 4. 流式生成答案
+    if fused_chunks and generator.api_key:
+        async for token in generator.generate_stream(query, fused_chunks):
+            event = {"type": "answer", "content": token}
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8")
+    elif fused_chunks:
+        # 无API Key，直接返回首段
+        preview = fused_chunks[0].content[:1000]
+        event = {"type": "answer", "content": preview}
+        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8")
+    else:
+        event = {"type": "answer", "content": "未检索到与查询相关的信息。"}
+        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8")
+
+    # 结束事件
+    yield f"data: {json.dumps({'type': 'done'})}\n\n".encode("utf-8")
+
+
+@router.post("/query/stream")
+async def query_knowledge_base_stream(
+    request: QueryRequest,
+    router_service: BaseRouter = Depends(get_router),
+    wiki_nav: WikiNavigator = Depends(get_wiki_navigator),
+    hybrid_retriever: HybridRetriever = Depends(get_hybrid_retriever),
+    fusion: ContextFusion = Depends(get_context_fusion),
+    generator: VLLMGenerator = Depends(get_generator),
+) -> StreamingResponse:
+    """流式查询知识库（SSE）。
+
+    与 /query 相同的检索逻辑，但答案以 SSE 流式返回。
+    """
+    return StreamingResponse(
+        _stream_query_events(
+            query=request.query,
+            top_k=request.top_k,
+            router_service=router_service,
+            wiki_nav=wiki_nav,
+            hybrid_retriever=hybrid_retriever,
+            fusion=fusion,
+            generator=generator,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ─── Wiki 导航 ───

@@ -66,6 +66,8 @@ class SourceItem(BaseModel):
     source: str  # "wiki" | "hybrid_rag"
     document_id: str
     score: float
+    vector_score: float = 0.0
+    bm25_score: float = 0.0
     metadata: dict[str, Any]
 
 

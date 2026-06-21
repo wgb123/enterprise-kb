@@ -19,6 +19,8 @@ class RetrievedChunk:
     document_id: str
     chunk_id: str
     score: float = 0.0
+    vector_score: float = 0.0  # score from vector search (Qdrant), 0 if unmatched
+    bm25_score: float = 0.0   # score from keyword search (BM25), 0 if unmatched
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

@@ -5,8 +5,11 @@
 """
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from enterprise_kb.agent import ToolRegistry
 from enterprise_kb.agent.default_tools import register_default_tools
@@ -80,6 +83,17 @@ app = FastAPI(
     "- C类: GraphRAG (预留)\n",
     lifespan=lifespan,
 )
+
+# 挂载静态文件（Web 查询页面）
+static_dir = Path(__file__).resolve().parent.parent.parent / "static"
+if static_dir.is_dir():
+    app.mount("/ui", StaticFiles(directory=str(static_dir), html=True), name="static")
+
+
+@app.get("/")
+async def root_redirect():
+    """根路径重定向到 Web UI。"""
+    return RedirectResponse(url="/ui/")
 
 # 注册路由
 app.include_router(router)

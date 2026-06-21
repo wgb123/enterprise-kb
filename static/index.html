@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Enterprise KB — 知识库查询</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
+    background: #f5f5f7;
+    color: #1d1d1f;
+    min-height: 100vh;
+  }
+  .container { max-width: 900px; margin: 0 auto; padding: 40px 20px; }
+
+  h1 {
+    font-size: 28px; font-weight: 600; margin-bottom: 6px;
+    letter-spacing: -0.5px;
+  }
+  .subtitle { color: #6e6e73; font-size: 14px; margin-bottom: 30px; }
+
+  .search-box {
+    background: #fff; border-radius: 16px; padding: 24px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.06); margin-bottom: 24px;
+  }
+  .search-row { display: flex; gap: 12px; align-items: center; }
+  .search-row input {
+    flex: 1; padding: 14px 18px; font-size: 16px; border: 1.5px solid #e5e5ea;
+    border-radius: 12px; outline: none; transition: border-color .2s;
+  }
+  .search-row input:focus { border-color: #007aff; }
+  .search-row button {
+    padding: 14px 28px; font-size: 16px; font-weight: 500;
+    background: #007aff; color: #fff; border: none; border-radius: 12px;
+    cursor: pointer; transition: opacity .2s; white-space: nowrap;
+  }
+  .search-row button:hover { opacity: .85; }
+  .search-row button:disabled { opacity: .4; cursor: not-allowed; }
+
+  .options {
+    display: flex; gap: 16px; margin-top: 14px; align-items: center;
+    font-size: 14px; color: #6e6e73;
+  }
+  .options label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .options input[type="number"] {
+    width: 64px; padding: 6px 10px; font-size: 14px;
+    border: 1px solid #e5e5ea; border-radius: 8px; outline: none;
+  }
+  .options input[type="checkbox"] { accent-color: #007aff; }
+
+  .status-bar {
+    font-size: 13px; color: #6e6e73; padding: 8px 0 16px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .spinner {
+    display: inline-block; width: 14px; height: 14px;
+    border: 2px solid #e5e5ea; border-top-color: #007aff;
+    border-radius: 50%; animation: spin .6s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .result-card {
+    background: #fff; border-radius: 16px; padding: 24px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.06); margin-bottom: 16px;
+    display: none;
+  }
+  .result-card.visible { display: block; }
+
+  .answer {
+    font-size: 15px; line-height: 1.7; white-space: pre-wrap;
+    margin-bottom: 20px; padding-bottom: 20px;
+    border-bottom: 1px solid #f0f0f2;
+  }
+  .answer strong { color: #007aff; }
+
+  .source-info {
+    display: flex; gap: 16px; font-size: 13px; color: #6e6e73; margin-bottom: 16px;
+  }
+  .source-info span { background: #f5f5f7; padding: 3px 10px; border-radius: 20px; }
+
+  .sources-title {
+    font-size: 13px; font-weight: 600; color: #6e6e73;
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px;
+  }
+
+  .source-item {
+    padding: 12px 14px; background: #f9f9fb; border-radius: 10px;
+    margin-bottom: 8px; font-size: 14px; line-height: 1.5;
+  }
+  .source-item .meta {
+    display: flex; gap: 10px; font-size: 12px; color: #6e6e73; margin-bottom: 4px;
+    flex-wrap: wrap; align-items: center;
+  }
+  .source-item .meta .tag {
+    background: #e8f0fe; color: #007aff; padding: 1px 8px;
+    border-radius: 10px; font-size: 11px;
+  }
+  .source-item .meta .tag-vector {
+    background: #e6f7ed; color: #0d9e4e; padding: 1px 8px;
+    border-radius: 10px; font-size: 11px;
+  }
+  .source-item .meta .tag-bm25 {
+    background: #fff7e6; color: #d48806; padding: 1px 8px;
+    border-radius: 10px; font-size: 11px;
+  }
+  .source-item .meta .tag-dual {
+    background: #e6f0ff; color: #1a5cff; padding: 1px 8px;
+    border-radius: 10px; font-size: 11px; font-weight: 600;
+  }
+  .source-item .meta .tag-vector-only {
+    background: #e6f7ed; color: #0d9e4e; padding: 1px 8px;
+    border-radius: 10px; font-size: 11px; font-weight: 600;
+  }
+  .source-item .meta .tag-bm25-only {
+    background: #fff7e6; color: #d48806; padding: 1px 8px;
+    border-radius: 10px; font-size: 11px; font-weight: 600;
+  }
+  .source-item .content { color: #1d1d1f; }
+
+  .hint {
+    background: #f9f9fb; border-radius: 12px; padding: 20px;
+    text-align: center; color: #6e6e73; font-size: 14px; line-height: 1.6;
+  }
+  .hint strong { color: #1d1d1f; }
+
+  .examples {
+    display: flex; gap: 8px; flex-wrap: wrap; margin-top: 24px;
+  }
+  .examples button {
+    padding: 8px 16px; font-size: 13px;
+    border: 1px solid #e5e5ea; border-radius: 20px;
+    background: #fff; color: #007aff; cursor: pointer;
+    transition: all .2s;
+  }
+  .examples button:hover {
+    background: #007aff; color: #fff; border-color: #007aff;
+  }
+
+  .error {
+    background: #fff2f0; border: 1px solid #ffccc7; border-radius: 12px;
+    padding: 14px 18px; color: #cf1322; font-size: 14px; margin-top: 12px;
+    display: none;
+  }
+  .error.visible { display: block; }
+
+  @media (max-width: 600px) {
+    .container { padding: 20px 12px; }
+    .search-row { flex-direction: column; }
+    .search-row button { width: 100%; text-align: center; }
+    .options { flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>📖 知识库查询</h1>
+  <p class="subtitle">Enterprise KB — HybridRAG 检索（Qdrant + BM25 + RRF 融合）</p>
+
+  <div class="search-box">
+    <div class="search-row">
+      <input type="text" id="query-input" placeholder="输入查询内容，例如「什么是机器学习」…"
+             autofocus>
+      <button id="search-btn" onclick="search()">查询</button>
+    </div>
+    <div class="options">
+      <label><input type="checkbox" id="use-generator" checked> 使用 LLM 生成答案</label>
+      <label>返回 <input type="number" id="top-k" value="5" min="1" max="20"> 条</label>
+    </div>
+  </div>
+
+  <div class="status-bar" id="status-bar"></div>
+
+  <div class="result-card" id="result-card">
+    <div class="source-info">
+      <span id="result-intent"></span>
+      <span id="result-count"></span>
+    </div>
+    <div class="answer" id="answer"></div>
+    <div class="sources-title">📎 参考来源</div>
+    <div id="sources-list"></div>
+  </div>
+
+  <div class="hint" id="hint">
+    <strong>💡 试试看</strong><br>
+    输入你想了解的问题，知识库会从维基百科数据中检索相关内容
+    <div class="examples" id="examples">
+      <button onclick="quickSearch(this.textContent)">什么是机器学习</button>
+      <button onclick="quickSearch(this.textContent)">Python 编程语言</button>
+      <button onclick="quickSearch(this.textContent)">深度学习</button>
+      <button onclick="quickSearch(this.textContent)">数据库</button>
+      <button onclick="quickSearch(this.textContent)">人工智能历史</button>
+    </div>
+  </div>
+
+  <div class="error" id="error-msg"></div>
+</div>
+
+<script>
+const input = document.getElementById('query-input');
+const btn = document.getElementById('search-btn');
+const statusBar = document.getElementById('status-bar');
+const resultCard = document.getElementById('result-card');
+const answer = document.getElementById('answer');
+const sourcesList = document.getElementById('sources-list');
+const hint = document.getElementById('hint');
+const errorMsg = document.getElementById('error-msg');
+const intentLabel = document.getElementById('result-intent');
+const countLabel = document.getElementById('result-count');
+
+input.addEventListener('keydown', e => { if (e.key === 'Enter') searchStream(); });
+
+function quickSearch(text) {
+  input.value = text;
+  searchStream();
+}
+
+// ── 流式查询（SSE） ──
+
+async function searchStream() {
+  const query = input.value.trim();
+  if (!query) return;
+
+  const useGenerator = document.getElementById('use-generator').checked;
+  const topK = parseInt(document.getElementById('top-k').value) || 5;
+
+  btn.disabled = true;
+  resultCard.classList.remove('visible');
+  hint.style.display = 'none';
+  errorMsg.classList.remove('visible');
+  answer.textContent = '';
+  sourcesList.innerHTML = '';
+  intentLabel.textContent = '';
+  countLabel.textContent = '';
+  statusBar.innerHTML = '<span class="spinner"></span> 正在检索…';
+
+  try {
+    const resp = await fetch('/api/v1/query/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, top_k: topK, use_generator: useGenerator }),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(text || `HTTP ${resp.status}`);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let answerText = '';
+    let sourcesData = [];
+    let streamDone = false;
+
+    while (!streamDone) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const dataStr = line.slice(6);
+        try {
+          const event = JSON.parse(dataStr);
+
+          if (event.type === 'metadata') {
+            intentLabel.textContent = `🎯 ${getIntentLabel(event.intent)}`;
+            countLabel.textContent = `${event.total_chunks} 个来源 | ${event.sources.length} 条展示`;
+            sourcesData = event.sources;
+            statusBar.textContent = '🤖 正在生成回答…';
+            resultCard.classList.add('visible');
+
+          } else if (event.type === 'answer') {
+            answerText += event.content;
+            answer.textContent = answerText;
+
+          } else if (event.type === 'done') {
+            streamDone = true;
+          }
+        } catch (e) {
+          // skip parse errors mid-stream
+        }
+      }
+    }
+
+    // 渲染来源
+    if (sourcesData.length > 0) {
+      sourcesList.innerHTML = sourcesData.map(s => {
+        const title = s.metadata?.title || s.document_id || '?';
+        const section = s.metadata?.section_heading || '';
+        const source = s.source || 'hybrid_rag';
+        const score = s.score !== undefined ? s.score.toFixed(4) : '-';
+        const text = s.content ? s.content.substring(0, 300) + (s.content.length > 300 ? '…' : '') : '';
+
+        // 判断检索通道命中情况
+        const vs = s.vector_score || 0;
+        const bs = s.bm25_score || 0;
+        let hitLabel, hitClass, hitIcon;
+        if (vs > 0 && bs > 0) {
+          hitLabel = '双通道命中'; hitClass = 'tag-dual'; hitIcon = '🔗';
+        } else if (vs > 0) {
+          hitLabel = '向量检索'; hitClass = 'tag-vector-only'; hitIcon = '🧠';
+        } else if (bs > 0) {
+          hitLabel = '关键词检索'; hitClass = 'tag-bm25-only'; hitIcon = '🔑';
+        } else {
+          hitLabel = 'RRF 融合'; hitClass = 'tag'; hitIcon = '⚡';
+        }
+
+        const vectorBadge = vs > 0 ? `<span class="tag-vector">🧠 ${vs.toFixed(4)}</span>` : '';
+        const bm25Badge = bs > 0 ? `<span class="tag-bm25">🔑 ${bs.toFixed(4)}</span>` : '';
+
+        return `<div class="source-item">
+          <div class="meta">
+            <span class="${hitClass}">${hitIcon} ${hitLabel}</span>
+            <span>📄 ${escHtml(title)}</span>
+            ${section ? `<span>📑 ${escHtml(section)}</span>` : ''}
+            ${vectorBadge}
+            ${bm25Badge}
+            <span>⚡ RRF ${score}</span>
+          </div>
+          <div class="content">${escHtml(text)}</div>
+        </div>`;
+      }).join('');
+    }
+
+    statusBar.textContent = `✅ 查询完成（${sourcesData.length} 条来源）`;
+
+  } catch (err) {
+    errorMsg.textContent = `❌ 查询失败: ${err.message}`;
+    errorMsg.classList.add('visible');
+    statusBar.textContent = '';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function getIntentLabel(intent) {
+  const map = { wiki: 'Wiki 检索', document: '文档检索', hybrid: '混合检索', general: '通用查询' };
+  return map[intent] || intent;
+}
+
+function sourceIcon(source) {
+  return source === 'wiki' ? '📝' : '🔍';
+}
+
+function escHtml(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+</script>
+</body>
+</html>
