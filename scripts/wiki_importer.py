@@ -242,9 +242,15 @@ class WikipediaImporter:
         if self.checkpoint_path.is_file():
             try:
                 data = json.loads(self.checkpoint_path.read_text())
-                # 兼容新旧格式: processed_ids (旧) 或 recent_ids (新)
-                ids = data.get("processed_ids") or data.get("recent_ids") or []
-                self._processed_ids = set(ids)
+                # 兼容新旧格式:
+                #   v2: processed_ids="1,2,3" 逗号分隔字符串
+                #   v1: processed_ids=[...] 或 recent_ids=[...] 列表
+                raw = data.get("processed_ids") or data.get("recent_ids") or []
+                if isinstance(raw, str):
+                    ids = raw.split(",")
+                else:
+                    ids = raw
+                self._processed_ids = set(id_ for id_ in ids if id_)
                 print(f"📌 发现断点，已处理 {len(self._processed_ids)} 篇")
             except Exception as exc:
                 print(f"⚠️ 断点文件损坏，重新开始: {exc}")
@@ -254,15 +260,19 @@ class WikipediaImporter:
             self._processed_ids = set()
 
     def _save_checkpoint(self) -> None:
-        """保存当前处理进度。"""
+        """保存当前处理进度。
+
+        自 v2 起，processed_ids 去重后完整保存（去除了 10,000 截断 bug）。
+        processed_ids 使用 `,` 分隔的字符串存储以节省空间。
+        """
         ids_list = list(self._processed_ids)
-        # 只保留最近的 ID（避免文件过大）
-        if len(ids_list) > 10000:
-            ids_list = ids_list[-10000:]
+        # 去重后完整保存（单篇 ID ~20 字符，50,000 篇约 1MB JSON）
+        ids_str = ",".join(sorted(ids_list))
 
         data = {
+            "version": 2,
             "processed_count": len(self._processed_ids),
-            "recent_ids": ids_list,
+            "processed_ids": ids_str,
             "page_count": self._page_count,
             "chunk_count": self._chunk_count,
             "timestamp": time.time(),

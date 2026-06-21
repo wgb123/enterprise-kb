@@ -2,6 +2,10 @@
 
 在应用启动时初始化所有服务实例，通过 FastAPI 的
 ``Depends`` 系统注入到路由处理器中。
+
+路由模式通过 ``ROUTER_TYPE`` 环境变量切换：
+  ``keyword``（默认）— SmartRouter，关键词匹配，毫秒级
+  ``llamaindex`` — LlamaIndexRouter，LLM 语义路由，需安装依赖
 """
 
 from functools import lru_cache
@@ -9,11 +13,30 @@ from functools import lru_cache
 from fastapi import Request
 
 from enterprise_kb.config import settings
+from enterprise_kb.interfaces.router import BaseRouter
 from enterprise_kb.core.fusion import ContextFusion
 from enterprise_kb.core.generator import VLLMGenerator
 from enterprise_kb.core.retriever import HybridRetriever
 from enterprise_kb.core.router import SmartRouter
 from enterprise_kb.core.wiki_navigator import WikiNavigator
+from enterprise_kb.utils.logger import logger
+
+
+def _create_router() -> BaseRouter:
+    """根据配置创建对应的路由器实例。
+
+    读取 ``settings.router_type`` 来决定使用哪种路由策略。
+    """
+    router_type = settings.router_type.lower()
+
+    if router_type == "llamaindex":
+        from enterprise_kb.core.llamaindex_router import LlamaIndexRouter
+
+        logger.info("Using LlamaIndexRouter (LLM semantic routing)")
+        return LlamaIndexRouter()
+
+    logger.info("Using SmartRouter (keyword routing)")
+    return SmartRouter()
 
 
 @lru_cache(maxsize=1)
@@ -32,9 +55,14 @@ def get_hybrid_retriever() -> HybridRetriever:
 
 
 @lru_cache(maxsize=1)
-def get_router() -> SmartRouter:
-    """获取（单例）智能路由器实例。"""
-    return SmartRouter()
+def get_router() -> BaseRouter:
+    """获取（单例）路由器实例。
+
+    路由策略由 ``ROUTER_TYPE`` 环境变量控制：
+    - ``keyword`` → SmartRouter（关键词匹配）
+    - ``llamaindex`` → LlamaIndexRouter（LLM 语义路由）
+    """
+    return _create_router()
 
 
 @lru_cache(maxsize=1)

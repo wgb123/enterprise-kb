@@ -41,7 +41,8 @@ def demo_smartrouter():
     print("🔧 【方法一】手写 SmartRouter — 关键词匹配路由")
     print("=" * 70)
 
-    from enterprise_kb.core.router import SmartRouter, QueryIntent
+    from enterprise_kb.core.router import SmartRouter
+    from enterprise_kb.interfaces.router import QueryIntent
 
     router = SmartRouter()
 

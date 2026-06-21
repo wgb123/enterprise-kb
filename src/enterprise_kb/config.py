@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     app_name: str = Field(default="Enterprise KB", alias="APP_NAME")
     debug: bool = Field(default=False, alias="DEBUG")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    router_type: str = Field(default="keyword", alias="ROUTER_TYPE")
 
     # ── LlamaParse ──
     llama_cloud_api_key: str = Field(default="", alias="LLAMA_CLOUD_API_KEY")

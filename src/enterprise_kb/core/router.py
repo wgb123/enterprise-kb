@@ -1,28 +1,23 @@
-"""智能路由模块 — 自动判断查询类型，分发到对应的引擎。
+"""智能路由模块 — 基于关键词的意图分类。
 
-支持三种路由策略：
+继承 BaseRouter 抽象基类，通过关键词匹配实现快速路由。
+与 LlamaIndexRouter（LLM 语义路由）共享同一接口，可自由切换。
+
+支持四种路由意图：
 1. Wiki 查询（A类）→ WikiNavigator
 2. 文档检索（B类）→ HybridRetriever
 3. 混合查询 → 并行分发两个引擎
+4. 通用 → 混合模式做最佳覆盖
 """
 
 import re
-from enum import Enum
 from typing import Optional
 
+from enterprise_kb.interfaces.router import BaseRouter, QueryIntent
 from enterprise_kb.utils.logger import logger
 
 
-class QueryIntent(str, Enum):
-    """查询意图类型。"""
-
-    WIKI = "wiki"  # 知识库导航/查询
-    DOCUMENT = "document"  # 文档检索
-    HYBRID = "hybrid"  # 混合查询（两者都需要）
-    GENERAL = "general"  # 通用问题（需要生成式回答）
-
-
-class SmartRouter:
+class SmartRouter(BaseRouter):
     """智能路由 — 根据查询内容自动选择引擎。
 
     判断依据：
@@ -34,7 +29,7 @@ class SmartRouter:
 
     # Wiki 路由关键词（命中任一即走 Wiki 引擎）
     WIKI_SIGNALS = [
-        "wiki", "知识库", "索引", "架构概览", "开发指南", "运维手册",
+        "wiki", "知识库", "索引", "架构", "开发指南", "运维手册",
         "编译式记忆", "deepwiki", "编译式",
         # 内部链接跳转信号
         "[[", "]]", "categories/", "index.md",

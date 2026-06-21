@@ -2,7 +2,8 @@
 
 import pytest
 
-from enterprise_kb.core.router import QueryIntent, SmartRouter
+from enterprise_kb.interfaces.router import QueryIntent
+from enterprise_kb.core.router import SmartRouter
 
 
 class TestSmartRouter:

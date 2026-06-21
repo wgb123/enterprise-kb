@@ -22,8 +22,15 @@ data/wiki_import.log
 # IDE
 .vscode/
 .idea/
+.deepseek/
 *.swp
 *.swo
+
+# Generated data (large / checkpoint)
+data/*.xml
+data/*.xml.bz2
+data/*.json
+!data/*.md
 
 # OS
 .DS_Store

@@ -37,7 +37,7 @@ from enterprise_kb.core.document_processor import Document, DocumentProcessor
 from enterprise_kb.core.fusion import ContextFusion
 from enterprise_kb.core.generator import VLLMGenerator
 from enterprise_kb.core.retriever import HybridRetriever
-from enterprise_kb.core.router import SmartRouter
+from enterprise_kb.interfaces.router import BaseRouter, QueryIntent
 from enterprise_kb.core.wiki_navigator import WikiNavigator
 from enterprise_kb.utils.logger import logger
 
@@ -117,7 +117,7 @@ async def ingest_documents(
 @router.post("/query", response_model=QueryResponse)
 async def query_knowledge_base(
     request: QueryRequest,
-    router_service: SmartRouter = Depends(get_router),
+    router_service: BaseRouter = Depends(get_router),
     wiki_nav: WikiNavigator = Depends(get_wiki_navigator),
     hybrid_retriever: HybridRetriever = Depends(get_hybrid_retriever),
     fusion: ContextFusion = Depends(get_context_fusion),
